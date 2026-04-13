@@ -1,0 +1,38 @@
+[project]
+name = "harness-lab"
+version = "0.1.0"
+description = "Educational coding-agent harness using PydanticAI"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic-ai>=1.80.0",
+    "pydantic-settings>=2.13.1",
+    "python-dotenv>=1.2.2",
+    "rich>=15.0.0",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+harness = "src.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "ruff>=0.15.10",
+    "rumdl>=0.1.70",
+    "taskipy>=1.14.1",
+    "ty>=0.0.29",
+]
