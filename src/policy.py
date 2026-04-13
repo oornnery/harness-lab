@@ -3,22 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import OrderedDict
-from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pydantic_ai import (
-    AgentStreamEvent,
-    FunctionToolCallEvent,
-    FunctionToolResultEvent,
     ModelRetry,
-    PartStartEvent,
-    RunContext,
-    TextPart,
-    ToolDefinition,
 )
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 
 from .context import IGNORED_DIRS, WorkspaceContext
 from .model import HarnessSettings
@@ -41,6 +32,7 @@ class RuntimePolicy:
     )
     recent_calls: OrderedDict[str, None] = field(default_factory=OrderedDict)
     mutations: list[dict[str, Any]] = field(default_factory=list)
+    tool_timings: dict[str, float] = field(default_factory=dict)
 
     def resolve_path(self, raw_path: str) -> Path:
         path = (self.workspace_root / raw_path).resolve()
@@ -100,66 +92,5 @@ class HarnessDeps:
     session_store: SessionStore
     session_id: str
     policy: RuntimePolicy
-
-
-@dataclass
-class ToolVisibilityCapability(AbstractCapability[HarnessDeps]):
-    """Hide mutating tools when the harness is in read-only mode."""
-
-    async def prepare_tools(
-        self,
-        ctx: RunContext[HarnessDeps],
-        tool_defs: list[ToolDefinition],
-    ) -> list[ToolDefinition]:
-        if not ctx.deps.settings.read_only:
-            return tool_defs
-        hidden = {"write_file", "replace_in_file", "run_shell"}
-        return [tool for tool in tool_defs if tool.name not in hidden]
-
-
-@dataclass
-class AuditCapability(AbstractCapability[HarnessDeps]):
-    """Audit tool activity and stream events into the session log."""
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position="outermost")
-
-    async def wrap_run_event_stream(
-        self,
-        ctx: RunContext[HarnessDeps],
-        *,
-        stream: AsyncIterable[AgentStreamEvent],
-    ) -> AsyncIterable[AgentStreamEvent]:
-        async for event in stream:
-            if isinstance(event, FunctionToolCallEvent):
-                await ctx.deps.session_store.append_event(
-                    ctx.deps.session_id,
-                    {
-                        "kind": "tool-call",
-                        "tool": event.part.tool_name,
-                        "args": event.part.args,
-                        "tool_call_id": event.part.tool_call_id,
-                    },
-                )
-            elif isinstance(event, FunctionToolResultEvent):
-                await ctx.deps.session_store.append_event(
-                    ctx.deps.session_id,
-                    {
-                        "kind": "tool-result",
-                        "tool_call_id": event.tool_call_id,
-                        "result": repr(event.result.content)[:500],
-                    },
-                )
-            elif isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
-                await ctx.deps.session_store.append_event(
-                    ctx.deps.session_id,
-                    {
-                        "kind": "text-start",
-                        "content": event.part.content[:200],
-                    },
-                )
-            yield event
-
-
-def build_capabilities() -> list[AbstractCapability[HarnessDeps]]:
-    return [AuditCapability(), ToolVisibilityCapability()]
+    persona_meta: dict[str, Any] = field(default_factory=dict)
+    delegation_depth: int = 0

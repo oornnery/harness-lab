@@ -4,10 +4,9 @@ import asyncio
 import difflib
 from pathlib import Path
 
-from pydantic_ai import Agent, ApprovalRequired, ModelRetry, RunContext
+from pydantic_ai import ApprovalRequired, ModelRetry, RunContext, Tool
 
 from .policy import HarnessDeps
-from .schema import HarnessOutput
 
 BINARY_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -64,15 +63,25 @@ BINARY_EXTENSIONS: frozenset[str] = frozenset(
 class ToolRuntime:
     """Real tools for the coding-agent harness.
 
-    This is intentionally close to the mini-coding-agent spirit: a small toolbox of
-    concrete repo operations with explicit behavior and predictable return values.
+    Tools are bound methods with `ctx: RunContext[HarnessDeps]` as the first
+    parameter. `as_tools()` wraps them into `Tool` objects that the agent
+    registers directly -- no module-level `register_tools` helper.
     """
 
     def __init__(self, deps: HarnessDeps) -> None:
         self.deps = deps
         self.root = deps.workspace.root
 
-    async def list_files(self, path: str = ".", limit: int = 200) -> list[str]:
+    async def list_files(
+        self, ctx: RunContext[HarnessDeps], path: str = ".", limit: int = 200
+    ) -> list[str]:
+        """List files under a workspace path.
+
+        Args:
+            path: Relative path inside the workspace.
+            limit: Maximum number of files to return.
+        """
+        ctx.deps.policy.guard_repeat("list_files", {"path": path, "limit": limit})
         root = self.deps.policy.resolve_path(path)
         return await asyncio.to_thread(self._list_files_sync, root, limit)
 
@@ -86,7 +95,24 @@ class ToolRuntime:
             results.append(str(file.relative_to(self.root)))
         return results
 
-    async def read_file(self, path: str, start_line: int = 1, end_line: int | None = None) -> str:
+    async def read_file(
+        self,
+        ctx: RunContext[HarnessDeps],
+        path: str,
+        start_line: int = 1,
+        end_line: int | None = None,
+    ) -> str:
+        """Read a file with line numbers.
+
+        Args:
+            path: Relative path inside the workspace.
+            start_line: First line to read.
+            end_line: Last line to read.
+        """
+        ctx.deps.policy.guard_repeat(
+            "read_file",
+            {"path": path, "start_line": start_line, "end_line": end_line},
+        )
         file_path = self.deps.policy.resolve_path(path)
         if not file_path.exists() or not file_path.is_file():
             raise ModelRetry(f"File not found: {path}")
@@ -103,7 +129,24 @@ class ToolRuntime:
         rendered = [f"{idx:>4}: {line}" for idx, line in enumerate(selected, start=start)]
         return "\n".join(rendered) if rendered else "<empty selection>"
 
-    async def search_text(self, query: str, path: str = ".", limit: int | None = None) -> list[str]:
+    async def search_text(
+        self,
+        ctx: RunContext[HarnessDeps],
+        query: str,
+        path: str = ".",
+        limit: int | None = None,
+    ) -> list[str]:
+        """Search for text across files in the workspace.
+
+        Args:
+            query: Case-insensitive text to search for.
+            path: Relative path to search under.
+            limit: Maximum number of matching lines.
+        """
+        ctx.deps.policy.guard_repeat(
+            "search_text",
+            {"query": query, "path": path, "limit": limit},
+        )
         search_root = self.deps.policy.resolve_path(path)
         limit = limit or self.deps.settings.max_search_hits
         results: list[str] = []
@@ -142,6 +185,13 @@ class ToolRuntime:
         raise ApprovalRequired(metadata={"reason": reason, "path": raw_path})
 
     async def write_file(self, ctx: RunContext[HarnessDeps], path: str, content: str) -> str:
+        """Create or replace a file.
+
+        Args:
+            path: Relative path inside the workspace.
+            content: Full file content.
+        """
+        ctx.deps.policy.guard_repeat("write_file", {"path": path, "content": content[:200]})
         file_path = self.deps.policy.resolve_path(path)
         self.deps.policy.check_write_allowed(file_path)
         self._require_write_approval(ctx, file_path, path)
@@ -159,6 +209,26 @@ class ToolRuntime:
         new: str,
         expected_replacements: int = 1,
     ) -> str:
+        """Replace exact text inside a file.
+
+        Args:
+            path: Relative path inside the workspace.
+            old: Existing text that must be found.
+            new: Replacement text.
+            expected_replacements: Expected number of matches. If > 0, the call
+                fails unless exactly that many occurrences are found, and only
+                that many are replaced. Pass 0 to replace all occurrences without
+                count validation.
+        """
+        ctx.deps.policy.guard_repeat(
+            "replace_in_file",
+            {
+                "path": path,
+                "old": old[:200],
+                "new": new[:200],
+                "expected_replacements": expected_replacements,
+            },
+        )
         file_path = self.deps.policy.resolve_path(path)
         self.deps.policy.check_write_allowed(file_path)
         self._require_write_approval(ctx, file_path, path)
@@ -190,13 +260,23 @@ class ToolRuntime:
         return diff[:4_000] or f"Updated {path}"
 
     async def run_shell(
-        self, ctx: RunContext[HarnessDeps], command: str, timeout: int | None = None
+        self,
+        ctx: RunContext[HarnessDeps],
+        command: str,
+        timeout: int | None = None,
     ) -> str:
+        """Run a shell command inside the workspace.
+
+        Args:
+            command: Shell command to execute.
+            timeout: Timeout in seconds.
+        """
+        ctx.deps.policy.guard_repeat("run_shell", {"command": command, "timeout": timeout})
         self.deps.policy.check_shell_allowed(command)
         if not ctx.tool_call_approved:
             raise ApprovalRequired(metadata={"reason": "shell", "command": command})
 
-        timeout = timeout or self.deps.settings.tool_timeout_seconds
+        timeout = timeout or self.deps.settings.shell_timeout_seconds
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=str(self.root),
@@ -223,115 +303,17 @@ class ToolRuntime:
             f"stderr:\n{err[:2000] or '<empty>'}"
         )
 
-
-def register_tools(agent: Agent[HarnessDeps, HarnessOutput], runtime: ToolRuntime) -> None:
-    @agent.tool
-    async def list_files(
-        ctx: RunContext[HarnessDeps], path: str = ".", limit: int = 200
-    ) -> list[str]:
-        """List files under a workspace path.
-
-        Args:
-            path: Relative path inside the workspace.
-            limit: Maximum number of files to return.
-        """
-        ctx.deps.policy.guard_repeat("list_files", {"path": path, "limit": limit})
-        return await runtime.list_files(path=path, limit=limit)
-
-    @agent.tool
-    async def read_file(
-        ctx: RunContext[HarnessDeps],
-        path: str,
-        start_line: int = 1,
-        end_line: int | None = None,
-    ) -> str:
-        """Read a file with line numbers.
-
-        Args:
-            path: Relative path inside the workspace.
-            start_line: First line to read.
-            end_line: Last line to read.
-        """
-        ctx.deps.policy.guard_repeat(
-            "read_file",
-            {"path": path, "start_line": start_line, "end_line": end_line},
-        )
-        return await runtime.read_file(path, start_line, end_line)
-
-    @agent.tool
-    async def search_text(
-        ctx: RunContext[HarnessDeps],
-        query: str,
-        path: str = ".",
-        limit: int | None = None,
-    ) -> list[str]:
-        """Search for text across files in the workspace.
-
-        Args:
-            query: Case-insensitive text to search for.
-            path: Relative path to search under.
-            limit: Maximum number of matching lines.
-        """
-        ctx.deps.policy.guard_repeat(
-            "search_text",
-            {"query": query, "path": path, "limit": limit},
-        )
-        return await runtime.search_text(query, path, limit)
-
-    @agent.tool
-    async def write_file(ctx: RunContext[HarnessDeps], path: str, content: str) -> str:
-        """Create or replace a file.
-
-        Args:
-            path: Relative path inside the workspace.
-            content: Full file content.
-        """
-        result = await runtime.write_file(ctx, path, content)
-        ctx.deps.policy.guard_repeat("write_file", {"path": path, "content": content[:200]})
-        return result
-
-    @agent.tool
-    async def replace_in_file(
-        ctx: RunContext[HarnessDeps],
-        path: str,
-        old: str,
-        new: str,
-        expected_replacements: int = 1,
-    ) -> str:
-        """Replace exact text inside a file.
-
-        Args:
-            path: Relative path inside the workspace.
-            old: Existing text that must be found.
-            new: Replacement text.
-            expected_replacements: Expected number of matches. If > 0, the call fails
-                unless exactly that many occurrences are found, and only that many are
-                replaced. Pass 0 to replace all occurrences without count validation.
-        """
-        result = await runtime.replace_in_file(ctx, path, old, new, expected_replacements)
-        ctx.deps.policy.guard_repeat(
-            "replace_in_file",
-            {
-                "path": path,
-                "old": old[:200],
-                "new": new[:200],
-                "expected_replacements": expected_replacements,
-            },
-        )
-        return result
-
-    @agent.tool(requires_approval=True)
-    async def run_shell(
-        ctx: RunContext[HarnessDeps],
-        command: str,
-        timeout: int | None = None,
-    ) -> str:
-        """Run a shell command inside the workspace.
-
-        Args:
-            command: Shell command to execute.
-            timeout: Timeout in seconds.
-        """
-        result = await runtime.run_shell(ctx, command, timeout)
-        ctx.deps.policy.guard_repeat("run_shell", {"command": command, "timeout": timeout})
-        return result
+    def as_tools(self) -> list[Tool[HarnessDeps]]:
+        return [
+            Tool(self.list_files, metadata={"category": "read"}),
+            Tool(self.read_file, metadata={"category": "read"}),
+            Tool(self.search_text, metadata={"category": "read"}),
+            Tool(self.write_file, metadata={"category": "mutate"}),
+            Tool(self.replace_in_file, metadata={"category": "mutate"}),
+            Tool(
+                self.run_shell,
+                metadata={"category": "shell"},
+                requires_approval=True,
+                timeout=float(self.deps.settings.shell_timeout_seconds),
+            ),
+        ]

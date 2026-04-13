@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
+from pydantic_ai import BinaryContent, DocumentUrl, ImageUrl, UsageLimits
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .policy import HarnessDeps
-from .sessions import SessionStore
+from ..agent import list_personas, load_persona
+from ..policy import HarnessDeps
+from ..sessions import SessionStore
+
+if TYPE_CHECKING:
+    from ..agent import AgentBuilder, AgentHandle
+    from .renderer import StreamRenderer
 
 CommandHandler = Callable[["ExtensionState", str], Awaitable[None]]
 
@@ -36,6 +43,10 @@ class ExtensionState:
     session_id: str
     known_tools: list[str]
     workspace_summary: str
+    handle: AgentHandle | None = None
+    builder: AgentBuilder | None = None
+    renderer: StreamRenderer | None = None
+    pending_attachments: list[Any] = field(default_factory=list)
 
 
 async def _help_command(state: ExtensionState, _: str) -> None:
@@ -127,6 +138,116 @@ async def _replay_command(state: ExtensionState, _: str) -> None:
     state.console.print(Panel(body, title="Recent replay log"))
 
 
+async def _agent_command(state: ExtensionState, arg: str) -> None:
+    if state.renderer is None or state.builder is None or state.handle is None:
+        state.console.print("[red]/agent unavailable: renderer/builder/handle not wired.[/]")
+        return
+    target = arg.strip()
+    if not target:
+        state.renderer.help_personas(list_personas(), current=state.handle.persona.name)
+        return
+    try:
+        load_persona(target)
+    except FileNotFoundError:
+        state.console.print(f"[red]Persona not found:[/] {target}")
+        return
+    state.handle = state.builder.rebuild(state.handle, target)
+    state.renderer.persona_switch(state.handle.persona)
+
+
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_DOC_EXT = {".pdf", ".txt", ".md", ".html", ".csv"}
+
+
+async def _attach_command(state: ExtensionState, arg: str) -> None:
+    target = arg.strip()
+    if not target:
+        if not state.pending_attachments:
+            state.console.print("[dim]no pending attachments.[/]")
+            return
+        state.console.print(f"[green]{len(state.pending_attachments)} pending attachment(s)[/]")
+        return
+    if target.lower().startswith(("http://", "https://")):
+        ext = Path(target.split("?")[0]).suffix.lower()
+        if ext in _IMAGE_EXT:
+            state.pending_attachments.append(ImageUrl(url=target))
+        else:
+            state.pending_attachments.append(DocumentUrl(url=target))
+        state.console.print(f"[green]attached URL:[/] {target}")
+        return
+    path = Path(target).expanduser()
+    if not path.exists() or not path.is_file():
+        state.console.print(f"[red]file not found:[/] {target}")
+        return
+    ext = path.suffix.lower()
+    if ext in _IMAGE_EXT:
+        media_type = f"image/{ext.lstrip('.').replace('jpg', 'jpeg')}"
+    elif ext == ".pdf":
+        media_type = "application/pdf"
+    elif ext in _DOC_EXT:
+        media_type = "text/plain"
+    else:
+        state.console.print(f"[red]unsupported extension:[/] {ext}")
+        return
+    state.pending_attachments.append(BinaryContent(data=path.read_bytes(), media_type=media_type))
+    state.console.print(f"[green]attached file:[/] {path} ({media_type})")
+
+
+async def _step_command(state: ExtensionState, arg: str) -> None:
+    from .step import StepRunner
+
+    if state.handle is None:
+        state.console.print("[red]/step unavailable: no handle.[/]")
+        return
+    prompt = arg.strip()
+    if not prompt:
+        state.console.print("[red]Usage:[/] /step <prompt>")
+        return
+    runner = StepRunner(state.console)
+    result = await runner.run(state.handle, prompt)
+    if result is not None and hasattr(result, "all_messages"):
+        state.handle.history = result.all_messages()
+        await state.session_store.save_history(state.session_id, state.handle.history)
+
+
+_BUDGETS = {
+    "cheap": UsageLimits(request_limit=20, total_tokens_limit=50_000),
+    "rich": UsageLimits(request_limit=100, total_tokens_limit=500_000),
+    "none": None,
+}
+
+
+async def _mode_command(state: ExtensionState, arg: str) -> None:
+    if state.renderer is None:
+        state.console.print("[red]/mode unavailable: renderer not wired.[/]")
+        return
+    token = arg.strip().lower()
+    settings = state.deps.settings
+    if not token:
+        state.renderer.mode_state(settings)
+        return
+    if token.startswith("budget="):
+        name = token.split("=", 1)[1]
+        if name not in _BUDGETS:
+            state.console.print("[red]Usage:[/] /mode budget=cheap|rich|none")
+            return
+        settings.usage_limits = _BUDGETS[name]
+    elif token == "readonly":
+        settings.read_only = not settings.read_only
+    elif token == "manual":
+        settings.approval_mode = "manual"
+    elif token in {"auto", "auto-safe"}:
+        settings.approval_mode = "auto-safe"
+    elif token == "never":
+        settings.approval_mode = "never"
+    else:
+        state.console.print(
+            "[red]Usage:[/] /mode [readonly|manual|auto|never|budget=cheap|rich|none]"
+        )
+        return
+    state.renderer.mode_state(settings)
+
+
 def stringify(value: Any) -> str:
     return str(value)
 
@@ -158,6 +279,26 @@ def default_extensions() -> list[HarnessExtension]:
                 "resume",
                 "Resume a previous session. No arg lists available sessions.",
                 _resume_command,
+            ),
+            CommandSpec(
+                "agent",
+                "Switch persona. No arg lists available personas.",
+                _agent_command,
+            ),
+            CommandSpec(
+                "mode",
+                "Show or toggle mode (readonly|manual|auto|never|budget=...).",
+                _mode_command,
+            ),
+            CommandSpec(
+                "attach",
+                "Attach a file or URL to the next turn.",
+                _attach_command,
+            ),
+            CommandSpec(
+                "step",
+                "Run a prompt step-by-step via agent.iter (debug).",
+                _step_command,
             ),
         ],
     )
