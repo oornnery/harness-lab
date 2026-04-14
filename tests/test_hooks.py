@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.agent.hooks import build_harness_hooks
+from src.hooks import build_harness_hooks
 
 
 def test_build_harness_hooks_registers_expected_entries():

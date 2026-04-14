@@ -1,6 +1,8 @@
+"""Harness output schema: pure domain types."""
+
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import (
@@ -11,7 +13,8 @@ from pydantic_ai import (
     ToolOutput,
 )
 
-from .policy import HarnessDeps
+if TYPE_CHECKING:
+    from .policy import HarnessDeps
 
 _DEFAULT_REASONING = "The result was assembled from tool outputs and workspace context."
 
@@ -22,11 +25,7 @@ class ActionRecord(BaseModel):
 
 
 class FinalAnswer(BaseModel):
-    """Structured final result for the coding harness.
-
-    Tool output mode is used on purpose because it coexists naturally with the rest
-    of the function tools and deferred approval flow.
-    """
+    """Structured final result for the coding harness."""
 
     summary: str = Field(description="Direct answer to the user's request.")
     reasoning_summary: str = Field(description="Short explanation of how the answer was reached.")
@@ -39,12 +38,7 @@ HarnessOutput = FinalAnswer | DeferredToolRequests
 
 
 def build_output_types(native: bool = False) -> list[Any]:
-    """Build the output union for the agent.
-
-    Default: `ToolOutput` (cross-provider, least tokens). `native=True`
-    switches to provider-native JSON mode (`NativeOutput`) for models that
-    support it (OpenAI gpt-4o+, gpt-5, Anthropic, Google).
-    """
+    """Build the output union for the agent."""
     wrapper = NativeOutput(FinalAnswer) if native else ToolOutput(FinalAnswer)
     return [wrapper, DeferredToolRequests]
 

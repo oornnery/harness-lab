@@ -51,6 +51,57 @@ def pii_filter_processor() -> HistoryProcessor:
     return _process
 
 
+def dedupe_reads_processor(recent_window: int = 6) -> HistoryProcessor:
+    """Drop repeated `read_file` tool returns for the same path in older history.
+
+    The skill `building-agents` flags duplicate file reads as the most
+    common context bloater. This processor keeps the *most recent* read
+    per path within the older portion of the history (everything outside
+    the last `recent_window` messages stays untouched in the recent
+    window). Deletion is in-place via `parts[:] = ...` because pydantic-ai
+    expects the same message objects.
+    """
+
+    async def _process(messages: list[ModelMessage]) -> list[ModelMessage]:
+        if len(messages) <= recent_window:
+            return messages
+
+        old_slice = messages[:-recent_window]
+        seen_paths: set[str] = set()
+        drop_indices: set[int] = set()
+
+        for idx in range(len(old_slice) - 1, -1, -1):
+            msg = old_slice[idx]
+            parts = list(getattr(msg, "parts", None) or [])
+            if not parts:
+                continue
+            tool_paths_in_msg: list[str] = []
+            for part in parts:
+                if getattr(part, "tool_name", None) != "read_file":
+                    continue
+                args = getattr(part, "args", None) or getattr(part, "tool_arguments", None)
+                path: str | None = None
+                if isinstance(args, dict):
+                    path = args.get("path")
+                elif isinstance(args, str):
+                    path = args
+                if path:
+                    tool_paths_in_msg.append(path)
+            if not tool_paths_in_msg:
+                continue
+            if all(p in seen_paths for p in tool_paths_in_msg):
+                drop_indices.add(idx)
+            else:
+                seen_paths.update(tool_paths_in_msg)
+
+        if not drop_indices:
+            return messages
+        kept_old = [m for i, m in enumerate(old_slice) if i not in drop_indices]
+        return [*kept_old, *messages[-recent_window:]]
+
+    return _process
+
+
 def truncate_processor(max_messages: int) -> HistoryProcessor:
     """Keep only the last `max_messages` entries."""
 
@@ -119,14 +170,11 @@ def summarize_old_processor(keep_last: int, summarize_model: str) -> HistoryProc
             return tail
 
         if summarizer is None:
+            from .personas import load_system_prompt
+
             summarizer = Agent(
                 summarize_model,
-                instructions=(
-                    "You compress prior agent conversation history. "
-                    "Produce a compact factual summary (<=300 words) "
-                    "preserving decisions, file paths, tool calls, and "
-                    "open questions. Drop filler."
-                ),
+                instructions=load_system_prompt("agents/history-summarizer"),
             )
 
         try:

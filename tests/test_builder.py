@@ -3,17 +3,17 @@ from __future__ import annotations
 from src.agent import AgentBuilder
 from src.model import HarnessSettings, ModelAdapter
 from src.policy import HarnessDeps
-from src.sessions import SessionStore
+from src.session import UnifiedStore
 
 
-def _builder(settings: HarnessSettings, store: SessionStore) -> AgentBuilder:
+def _builder(settings: HarnessSettings, store: UnifiedStore) -> AgentBuilder:
     return AgentBuilder(settings, ModelAdapter(settings), store)
 
 
 async def test_setup_builds_handle(
     harness_deps: HarnessDeps,
     harness_settings: HarnessSettings,
-    session_store: SessionStore,
+    session_store: UnifiedStore,
 ):
     builder = _builder(harness_settings, session_store)
     handle = builder.setup(harness_deps, history=[])
@@ -25,7 +25,7 @@ async def test_setup_builds_handle(
 async def test_rebuild_switches_persona(
     harness_deps: HarnessDeps,
     harness_settings: HarnessSettings,
-    session_store: SessionStore,
+    session_store: UnifiedStore,
 ):
     builder = _builder(harness_settings, session_store)
     handle = builder.setup(harness_deps, history=[])
@@ -38,7 +38,7 @@ async def test_rebuild_switches_persona(
 async def test_rebuild_preserves_runtime_identity(
     harness_deps: HarnessDeps,
     harness_settings: HarnessSettings,
-    session_store: SessionStore,
+    session_store: UnifiedStore,
 ):
     builder = _builder(harness_settings, session_store)
     handle = builder.setup(harness_deps, history=[])

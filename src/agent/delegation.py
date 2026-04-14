@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai import ModelRetry, RunContext, Tool
 
-from ..policy import HarnessDeps
-from ..schema import FinalAnswer
-from ..tools import ToolRuntime
+from src.policy import HarnessDeps, RuntimePolicy, WorkingMemory
+from src.schema import FinalAnswer
+from src.tools import ToolRuntime
 
 if TYPE_CHECKING:
     from .builder import AgentBuilder
@@ -28,8 +29,22 @@ class DelegationTools:
     def as_tools(self) -> list[Tool[HarnessDeps]]:
         return [self._make_tool(name) for name in self.targets]
 
+    @staticmethod
+    def _build_sub_deps(parent: HarnessDeps, task: str) -> HarnessDeps:
+        """Forge a constrained child deps: read-only, never-approve, fresh state."""
+        sub_settings = replace(parent.settings, read_only=True, approval_mode="never")
+        sub_policy = RuntimePolicy(sub_settings, parent.workspace.root)
+        return replace(
+            parent,
+            settings=sub_settings,
+            policy=sub_policy,
+            working_memory=WorkingMemory(task=task),
+            delegation_depth=parent.delegation_depth + 1,
+            retrieved_memories="",
+        )
+
     def _make_tool(self, persona_name: str) -> Tool[HarnessDeps]:
-        async def _delegate(ctx: RunContext[HarnessDeps], task: str) -> str:
+        async def _delegate(ctx: RunContext[HarnessDeps], task: str) -> dict[str, Any]:
             if ctx.deps.delegation_depth >= _MAX_DEPTH:
                 raise ModelRetry(
                     f"delegation depth limit {_MAX_DEPTH} reached; finish this step directly."
@@ -37,27 +52,32 @@ class DelegationTools:
             from .personas import load_persona
 
             persona = load_persona(persona_name)
-            sub_runtime = ToolRuntime(ctx.deps)
+            sub_deps = self._build_sub_deps(ctx.deps, task)
+            sub_runtime = ToolRuntime(sub_deps)
             sub_agent = self.builder._build_agent(  # type: ignore[attr-defined]
-                ctx.deps, sub_runtime, persona
+                sub_deps, sub_runtime, persona
             )
 
-            ctx.deps.delegation_depth += 1
-            try:
-                result = await sub_agent.run(task, deps=ctx.deps)
-            finally:
-                ctx.deps.delegation_depth -= 1
-
+            result = await sub_agent.run(task, deps=sub_deps)
             output = result.output
             if isinstance(output, FinalAnswer):
-                return output.summary
-            return f"[deferred: {type(output).__name__}]"
+                return {
+                    "persona": persona_name,
+                    "status": "ok",
+                    "answer": output.model_dump(mode="json"),
+                }
+            return {
+                "persona": persona_name,
+                "status": "deferred",
+                "reason": type(output).__name__,
+            }
 
         _delegate.__name__ = f"delegate_to_{persona_name}"
         _delegate.__doc__ = (
             f"Delegate a sub-task to the `{persona_name}` persona. "
-            f"Returns the sub-agent final summary. "
-            f"Use for work that should be done by that specialist."
+            f"Sub-agent runs read-only with approval_mode=never and a fresh "
+            f"working memory. Returns a dict with keys: persona, status "
+            f"(ok|deferred), answer (full FinalAnswer fields), reason."
         )
         return Tool(
             _delegate,

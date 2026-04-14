@@ -38,6 +38,10 @@ exclude = [
     # Specific files or patterns
     "CHANGELOG.md",
     "LICENSE.md",
+    # Runtime prompt assets (loaded by harness; frontmatter / no H1).
+    # README.md stays linted; the rest is runtime-only.
+    "src/prompts/agents",
+    "src/prompts/instructions",
 ]
 
 # Respect .gitignore files when scanning directories (default: true)

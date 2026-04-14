@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.background import BackgroundRunner
 
 from pydantic_ai import (
     ModelRetry,
 )
 
+from src.memory import MemoryStore
+from src.session import UnifiedStore
+
 from .context import IGNORED_DIRS, WorkspaceContext
-from .model import HarnessSettings
-from .sessions import SessionStore
+from .model import HarnessSettings, ModelAdapter
 
 REPEAT_GUARD_MAX = 256
 
@@ -39,6 +44,16 @@ class RuntimePolicy:
         if self.workspace_root != path and self.workspace_root not in path.parents:
             raise ModelRetry(f"Path escapes the workspace sandbox: {raw_path}")
         return path
+
+    def clear_session(self) -> None:
+        """Clear accumulated state (recent_calls, mutations, tool_timings).
+
+        Call this when switching sessions or after long-running operations
+        to prevent unbounded memory growth.
+        """
+        self.recent_calls.clear()
+        self.mutations.clear()
+        self.tool_timings.clear()
 
     def skip_path(self, path: Path) -> bool:
         return bool(set(path.parts) & IGNORED_DIRS)
@@ -85,12 +100,70 @@ class RuntimePolicy:
         self.mutations.append({"kind": kind, "payload": payload})
 
 
+_MAX_FILES = 8
+_MAX_NOTES = 5
+_NOTE_KEY_LEN = 60
+
+
+@dataclass
+class WorkingMemory:
+    """In-session scratch pad rendered into the agent prompt every turn.
+
+    Distinct from `MemoryStore` (long-term semantic SQLite). This one
+    holds the active task, the few last touched files, and short notes
+    the model explicitly captures via `save_note`.
+    """
+
+    task: str = ""
+    files_touched: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_FILES))
+    notes: dict[str, str] = field(default_factory=dict)
+    _note_order: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_NOTES))
+
+    def touch_file(self, path: str) -> None:
+        if not path:
+            return
+        if path in self.files_touched:
+            self.files_touched.remove(path)
+        self.files_touched.append(path)
+
+    def save_note(self, key: str, content: str) -> None:
+        key = key.strip()[:_NOTE_KEY_LEN]
+        if not key:
+            return
+        if key in self.notes:
+            self._note_order.remove(key)
+        elif len(self._note_order) == _MAX_NOTES:
+            evicted = self._note_order.popleft()
+            self.notes.pop(evicted, None)
+        self._note_order.append(key)
+        self.notes[key] = content.strip()
+
+    def query_notes(self, query: str = "") -> dict[str, str]:
+        if not query:
+            return dict(self.notes)
+        q = query.lower()
+        return {k: v for k, v in self.notes.items() if q in k.lower() or q in v.lower()}
+
+    def render(self) -> str:
+        files = ", ".join(self.files_touched) if self.files_touched else "-"
+        if self.notes:
+            notes = "\n".join(f"  - {k}: {v}" for k, v in self.notes.items())
+        else:
+            notes = "  - (none)"
+        return f"task: {self.task or '-'}\nfiles_touched: {files}\nnotes:\n{notes}"
+
+
 @dataclass
 class HarnessDeps:
     settings: HarnessSettings
     workspace: WorkspaceContext
-    session_store: SessionStore
+    session_store: UnifiedStore
     session_id: str
     policy: RuntimePolicy
+    model_adapter: ModelAdapter
+    memory_store: MemoryStore | None = None
     persona_meta: dict[str, Any] = field(default_factory=dict)
     delegation_depth: int = 0
+    retrieved_memories: str = field(default_factory=str)
+    working_memory: WorkingMemory = field(default_factory=WorkingMemory)
+    background_runner: BackgroundRunner | None = None

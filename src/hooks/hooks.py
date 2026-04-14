@@ -16,7 +16,8 @@ from pydantic_ai import (
 )
 from pydantic_ai.capabilities.hooks import Hooks
 
-from ..policy import HarnessDeps
+from src.memory.extractor import get_extractor
+from src.policy import HarnessDeps
 
 
 def build_harness_hooks() -> Hooks[HarnessDeps]:
@@ -139,6 +140,57 @@ def build_harness_hooks() -> Hooks[HarnessDeps]:
         /,
     ) -> Any:
         messages = getattr(request_context, "messages", None) or []
+
+        # Fetch relevant memories if enabled
+        if ctx.deps.settings.enable_memory and ctx.deps.memory_store and messages:
+            try:
+                # Get user's query from the first ModelRequest's UserPromptPart
+                last_user_msg = ""
+                first_msg = messages[0]
+
+                if hasattr(first_msg, "parts") and first_msg.parts:
+                    first_part = first_msg.parts[0]
+                    if hasattr(first_part, "content"):
+                        last_user_msg = str(first_part.content).strip()
+
+                if last_user_msg:
+                    # Search for relevant memories
+                    memories = await ctx.deps.memory_store.search_memories(
+                        last_user_msg,
+                        limit=3,
+                    )
+
+                    if memories:
+                        memory_lines = []
+                        for m in memories:
+                            memory_lines.append(f"- [{m.entity_type}] {m.content}")
+                        # Store in deps for render_dynamic to use
+                        ctx.deps.retrieved_memories = "\n".join(memory_lines)
+
+                        # Log for debugging
+                        await ctx.deps.session_store.append_event(
+                            ctx.deps.session_id,
+                            {
+                                "kind": "memory-injection",
+                                "query": last_user_msg,
+                                "memories_count": len(memories),
+                            },
+                        )
+                    else:
+                        ctx.deps.retrieved_memories = ""
+            except Exception as e:
+                # Don't fail the request if memory injection fails
+                await ctx.deps.session_store.append_event(
+                    ctx.deps.session_id,
+                    {
+                        "kind": "memory-injection-error",
+                        "error_type": type(e).__name__,
+                        "message": str(e)[:500],
+                    },
+                )
+        else:
+            ctx.deps.retrieved_memories = ""
+
         await ctx.deps.session_store.append_event(
             ctx.deps.session_id,
             {
@@ -156,6 +208,7 @@ def build_harness_hooks() -> Hooks[HarnessDeps]:
         request_context: Any,
         response: Any,
     ) -> Any:
+        """Extract memories after model response."""
         usage = getattr(response, "usage", None)
         await ctx.deps.session_store.append_event(
             ctx.deps.session_id,
@@ -165,6 +218,62 @@ def build_harness_hooks() -> Hooks[HarnessDeps]:
                 "output_tokens": getattr(usage, "output_tokens", None),
             },
         )
+
+        # Extract memories if enabled
+        if not ctx.deps.settings.enable_memory:
+            return response
+
+        if ctx.deps.memory_store is None:
+            return response
+
+        # Extract messages from conversation
+        messages_text = []
+        for msg in ctx.messages:
+            if hasattr(msg, "content"):
+                messages_text.append(msg.content)
+            elif hasattr(msg, "parts"):
+                for part in msg.parts:
+                    if hasattr(part, "content"):
+                        messages_text.append(part.content)
+
+        if not messages_text:
+            return response
+
+        # Use memory extraction agent
+        try:
+            extraction_model = ctx.deps.model_adapter.build_model()
+            extractor = get_extractor(extraction_model)
+            memories = await extractor.extract(
+                session_id=ctx.deps.session_id,
+                messages=messages_text,
+                max_memories=10,
+            )
+
+            # Filter by confidence threshold
+            threshold = ctx.deps.settings.memory_extraction_threshold
+            filtered = [m for m in memories if m.confidence >= threshold]
+
+            if filtered:
+                await ctx.deps.memory_store.save_memories(filtered)
+                await ctx.deps.session_store.append_event(
+                    ctx.deps.session_id,
+                    {
+                        "kind": "memory-extracted",
+                        "count": len(filtered),
+                        "memories": [m.content for m in filtered],
+                    },
+                )
+        except Exception as e:
+            # Don't fail the request if memory extraction fails
+            await ctx.deps.session_store.append_event(
+                ctx.deps.session_id,
+                {
+                    "kind": "memory-extraction-error",
+                    "error_type": type(e).__name__,
+                    "message": str(e)[:500],
+                },
+            )
+
         return response
 
     @hooks.on.model_request_error

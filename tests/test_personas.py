@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.agent import list_personas, load_persona
+from src.agent.personas import clear_persona_cache, prompts_dir
 
 
 def test_load_agents_persona():
@@ -44,3 +45,20 @@ def test_coder_base_chain_prepends_agents():
 def test_planner_delegates_list():
     doc = load_persona("planner")
     assert doc.metadata["delegates"] == ["coder", "reviewer"]
+
+
+def test_clear_persona_cache_forces_reload():
+    load_persona("AGENTS")  # populate cache
+    before = load_persona.cache_info()
+    assert before.currsize >= 1
+    clear_persona_cache()
+    after = load_persona.cache_info()
+    assert after.currsize == 0
+    # Repopulate so other tests keep hitting the cache.
+    load_persona("AGENTS")
+
+
+def test_prompts_dir_points_at_prompts_folder():
+    path = prompts_dir()
+    assert path.name == "prompts"
+    assert (path / "agents" / "AGENTS.md").exists()

@@ -18,13 +18,13 @@ from src.agent import AgentBuilder
 from src.model import HarnessSettings, ModelAdapter
 from src.policy import HarnessDeps
 from src.schema import FinalAnswer
-from src.sessions import SessionStore
+from src.session import UnifiedStore
 
 
 async def _run_turn_with_test_model(
     deps: HarnessDeps,
     settings: HarnessSettings,
-    store: SessionStore,
+    store: UnifiedStore,
     persona: str,
     prompt: str,
     summary: str,
@@ -87,7 +87,7 @@ async def test_personas_eval_dataset(
     persona_dataset: Any,
     harness_deps: HarnessDeps,
     harness_settings: HarnessSettings,
-    session_store: SessionStore,
+    session_store: UnifiedStore,
 ):
     async def task(prompt: str) -> FinalAnswer | str:
         persona = "AGENTS"

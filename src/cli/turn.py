@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from pydantic_ai import (
@@ -8,12 +9,14 @@ from pydantic_ai import (
     DeferredToolResults,
     ToolDenied,
     UsageLimitExceeded,
+    UsageLimits,
 )
 from rich.panel import Panel
 
-from ..agent import AgentHandle
-from ..model import HarnessSettings
-from .renderer import StreamRenderer
+from src.agent import AgentHandle
+from src.model import HarnessSettings
+
+from .ui.renderer import StreamRenderer
 
 
 class TurnRunner:
@@ -26,6 +29,16 @@ class TurnRunner:
         self.renderer = renderer
         self.settings = settings
 
+    def _effective_usage_limits(self) -> UsageLimits | None:
+        """Merge per-turn `max_steps_per_turn` into the user's usage limits."""
+        base = self.settings.usage_limits
+        budget = self.settings.max_steps_per_turn
+        if base is None:
+            return UsageLimits(request_limit=budget) if budget > 0 else None
+        if budget <= 0 or (base.request_limit and base.request_limit <= budget):
+            return base
+        return replace(base, request_limit=budget)
+
     async def run(
         self,
         handle: AgentHandle,
@@ -34,6 +47,8 @@ class TurnRunner:
     ) -> Any:
         handle.deps.policy.recent_calls.clear()
         handle.deps.policy.tool_timings.clear()
+        if not handle.deps.working_memory.task:
+            handle.deps.working_memory.task = user_prompt[:300]
 
         current_history: list[Any] = handle.history
         deferred_results: DeferredToolResults | None = None
@@ -48,7 +63,7 @@ class TurnRunner:
                     message_history=current_history,
                     deferred_tool_results=deferred_results,
                     deps=handle.deps,
-                    usage_limits=self.settings.usage_limits,
+                    usage_limits=self._effective_usage_limits(),
                 ):
                     if isinstance(event, AgentRunResultEvent):
                         result = event.result

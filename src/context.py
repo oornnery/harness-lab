@@ -81,12 +81,20 @@ class ContextBuilder:
         recent_commits: list[str] = []
 
         if self.settings.include_git_context:
-            branch = await self._git("rev-parse", "--abbrev-ref", "HEAD")
-            default_branch = await self._git("symbolic-ref", "refs/remotes/origin/HEAD")
+            # Parallelize git operations for faster startup
+            branch_task = asyncio.create_task(self._git("rev-parse", "--abbrev-ref", "HEAD"))
+            default_ref_task = asyncio.create_task(
+                self._git("symbolic-ref", "refs/remotes/origin/HEAD")
+            )
+            status_task = asyncio.create_task(self._git("status", "--short"))
+            log_task = asyncio.create_task(self._git("log", "--oneline", "-5"))
+
+            branch = await branch_task
+            default_branch = await default_ref_task
             if default_branch and "/" in default_branch:
                 default_branch = default_branch.rsplit("/", 1)[-1]
-            git_status = await self._git("status", "--short")
-            commits = await self._git("log", "--oneline", "-5")
+            git_status = await status_task
+            commits = await log_task
             if commits:
                 recent_commits = [line for line in commits.splitlines() if line.strip()]
 

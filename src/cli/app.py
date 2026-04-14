@@ -2,19 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import signal
 import time
 
 from rich.console import Console
 
-from ..agent import AgentBuilder, AgentHandle
-from ..context import ContextBuilder
-from ..model import HarnessSettings, ModelAdapter
-from ..policy import HarnessDeps, RuntimePolicy
-from ..sessions import SessionStore
+from src.agent import AgentBuilder, AgentHandle
+from src.agent.watcher import PersonaWatcher
+from src.background import BackgroundRunner
+from src.context import ContextBuilder
+from src.memory import MemoryStore
+from src.model import HarnessSettings, ModelAdapter
+from src.policy import HarnessDeps, RuntimePolicy
+from src.scheduler import Scheduler
+from src.session import UnifiedStore
+from src.tools import TOOL_NAMES
+
 from .commands import ExtensionState, build_command_index
-from .renderer import StreamRenderer
 from .turn import TurnRunner
+from .ui.renderer import StreamRenderer
 
 
 def _configure_logfire(settings: HarnessSettings) -> None:
@@ -34,11 +39,48 @@ class HarnessCliApp:
         self.settings = HarnessSettings()
         _configure_logfire(self.settings)
         self.model_adapter = ModelAdapter(self.settings)
-        self.session_store = SessionStore(self.settings.resolved_session_dir())
+        self.session_store = UnifiedStore(self.settings.resolved_session_dir())
         self.renderer = StreamRenderer(self.console, self.settings)
         self.builder = AgentBuilder(self.settings, self.model_adapter, self.session_store)
         self.turn_runner = TurnRunner(self.renderer, self.settings)
         self.commands = build_command_index()
+
+        self.memory_store = None
+        if self.settings.enable_memory:
+            self.memory_store = MemoryStore(
+                self.settings.resolved_session_dir(),
+                enable_embeddings=True,
+            )
+
+        self.background_runner = BackgroundRunner(self.builder, self.session_store)
+        self._parent_deps: HarnessDeps | None = None
+        self.scheduler = Scheduler(
+            session_store=self.session_store,
+            background_runner=self.background_runner,
+            parent_deps_provider=self._current_parent_deps,
+        )
+        self._current_handle: AgentHandle | None = None
+        self.persona_watcher: PersonaWatcher | None = None
+        if self.settings.hot_reload_personas:
+            self.persona_watcher = PersonaWatcher(on_reload=self._on_persona_reload)
+
+    def _current_parent_deps(self) -> HarnessDeps:
+        if self._parent_deps is None:
+            raise RuntimeError("scheduler fired before CLI setup completed")
+        return self._parent_deps
+
+    async def _on_persona_reload(self, paths: set) -> None:
+        handle = self._current_handle
+        if handle is None:
+            return
+        try:
+            new_handle = self.builder.rebuild(handle, handle.persona.name)
+        except Exception as exc:
+            self.console.print(f"[red]persona reload failed:[/] {exc}")
+            return
+        self._current_handle = new_handle
+        names = ", ".join(sorted({p.stem for p in paths}))
+        self.console.print(f"[bold cyan]\u276f personas reloaded:[/] {names}")
 
     async def setup(self) -> tuple[AgentHandle, ExtensionState]:
         self.renderer.boot_panel(self.model_adapter)
@@ -54,7 +96,11 @@ class HarnessCliApp:
             session_store=self.session_store,
             session_id=session_id,
             policy=RuntimePolicy(self.settings, workspace.root),
+            model_adapter=self.model_adapter,
+            memory_store=self.memory_store,
+            background_runner=self.background_runner,
         )
+        self._parent_deps = deps
 
         handle = self.builder.setup(deps, history)
 
@@ -62,15 +108,7 @@ class HarnessCliApp:
             console=self.console,
             deps=deps,
             session_store=self.session_store,
-            session_id=session_id,
-            known_tools=[
-                "list_files",
-                "read_file",
-                "search_text",
-                "write_file",
-                "replace_in_file",
-                "run_shell",
-            ],
+            known_tools=list(TOOL_NAMES),
             workspace_summary=workspace.prompt_summary(),
             handle=handle,
             builder=self.builder,
@@ -80,31 +118,29 @@ class HarnessCliApp:
 
     async def run(self) -> None:
         handle, ext_state = await self.setup()
+        self._current_handle = handle
+        self.scheduler.start()
+        if self.persona_watcher is not None:
+            self.persona_watcher.start()
 
         self.console.print(
             "[dim]commands:[/] /help /agent /mode /attach /step /context /tools "
-            "/session /fork /replay /clear /compact /resume /quit"
+            "/session /fork /replay /clear /compact /resume /todos /jobs /schedule /quit"
         )
 
-        # Handle SIGINT cleanly
-        loop = asyncio.get_running_loop()
-        shutdown_event = asyncio.Event()
-
-        def _signal_handler() -> None:
-            shutdown_event.set()
-            self.console.print("\n[dim]bye.[/]")
-
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(signal.SIGINT, _signal_handler)
-
         try:
-            while not shutdown_event.is_set():
+            while True:
                 try:
-                    # Print colored prompt, then input for clean Ctrl+C
-                    self.console.print(
-                        self.renderer.prompt_prefix(handle.persona.name), end=""
-                    )
-                    user_input = await asyncio.to_thread(input, "")
+                    await self._drain_background_banner()
+                    self.console.print(self.renderer.prompt_prefix(handle.persona.name), end="")
+
+                    def _read_input() -> str:
+                        try:
+                            return input("")
+                        except KeyboardInterrupt:
+                            raise EOFError from None  # Convert before asyncio sees it
+
+                    user_input = await asyncio.to_thread(_read_input)
                 except (EOFError, KeyboardInterrupt):
                     self.console.print("\n[dim]bye.[/]")
                     return
@@ -133,7 +169,28 @@ class HarnessCliApp:
                 self.renderer.final_result(result.output)
                 self.renderer.turn_stats(result, elapsed, self.model_adapter.model_name)
         finally:
-            pass  # Rich Prompt handles history internally
+            if self.persona_watcher is not None:
+                await self.persona_watcher.stop()
+            await self.scheduler.stop()
+            await self.background_runner.shutdown()
+
+    async def _drain_background_banner(self) -> None:
+        finished = await self.background_runner.drain_completed()
+        if not finished:
+            return
+        ids = ", ".join(finished)
+        self.console.print(f"[bold green]\u276f background done:[/] {ids} [dim](use /jobs)[/]")
+
+    async def _sync_handle(self, handle: AgentHandle, state: ExtensionState) -> AgentHandle:
+        """Synchronize handle state after command execution.
+
+        If the command modified the handle (stored in state.handle), use it.
+        Otherwise, reload history from the session store for the current handle.
+        """
+        handle = state.handle or handle
+        handle.history = await self.session_store.load_history(state.session_id)
+        state.handle = handle
+        return handle
 
     async def _handle_command(
         self, handle: AgentHandle, state: ExtensionState, raw: str
@@ -144,13 +201,12 @@ class HarnessCliApp:
             self.console.print(f"[red]Unknown command:[/] {name}")
             return handle
         await command.handler(state, arg)
-        handle = state.handle or handle
-        handle.history = await self.session_store.load_history(state.session_id)
-        state.handle = handle
-        return handle
+        return await self._sync_handle(handle, state)
+
 
 def main() -> None:
-    asyncio.run(HarnessCliApp().run())
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(HarnessCliApp().run())
 
 
 if __name__ == "__main__":

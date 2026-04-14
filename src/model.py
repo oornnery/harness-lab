@@ -46,6 +46,7 @@ class HarnessSettings(BaseSettings):
     max_history_messages: int = 24
     tool_timeout_seconds: int = 30
     shell_timeout_seconds: int = 300
+    max_steps_per_turn: int = 12
     max_search_hits: int = 50
     max_file_lines: int = 250
     show_thinking: bool = False
@@ -57,8 +58,19 @@ class HarnessSettings(BaseSettings):
     adaptive_trim_threshold: int = 80_000
     adaptive_trim_floor: int = 6
     mcp_config_path: Path | None = Field(default=None, validation_alias="MCP_CONFIG_PATH")
+    mcp_tool_prefix: str = "mcp_"
     logfire_enable: bool = False
     logfire_capture_http: bool = False
+    hot_reload_personas: bool = False
+
+    # Memory system
+    enable_memory: bool = Field(default=True, validation_alias="ENABLE_MEMORY")
+    memory_db_path: Path = Field(
+        default=Path(".harness/memory.db"), validation_alias="MEMORY_DB_PATH"
+    )
+    memory_extraction_threshold: float = 0.7
+    max_memories_per_session: int = 100
+    memory_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     def resolved_workspace(self) -> Path:
         return self.workspace.expanduser().resolve()
@@ -83,32 +95,53 @@ class ModelAdapter:
 
     def __init__(self, settings: HarnessSettings) -> None:
         self.settings = settings
+        self._supports_native_output = self._check_native_output()
+
+    def _check_native_output(self) -> bool:
+        """Check if the configured model supports native structured output."""
+        provider, raw = self._parse_model_name()
+        if provider == "anthropic":
+            return True
+        if provider == "google":
+            return True
+        if provider == "openai" and raw:
+            return raw.startswith(("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4"))
+        return False
 
     @property
     def model_name(self) -> str:
         return self.settings.model
 
+    def _parse_model_name(self) -> tuple[str, str | None]:
+        """Parse model string into (provider, model_name) tuple.
+
+        Returns:
+            (provider, raw_model) where provider is 'openai', 'anthropic', 'google', etc.
+            and raw_model is the model name without prefix (or None if no prefix).
+        """
+        model = self.settings.model
+        if ":" in model:
+            provider, raw = model.split(":", 1)
+            return provider.lower(), raw
+        return "openai", model
+
     def supports_native_output(self) -> bool:
-        name = self.settings.model.lower()
-        if name.startswith("anthropic:"):
-            return True
-        if name.startswith("google"):
-            return True
-        if name.startswith("openai:"):
-            raw = name.split(":", 1)[1]
-            return raw.startswith(("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4"))
-        return False
+        """Check if the configured model supports native structured output.
+
+        Result is cached at initialization.
+        """
+        return self._supports_native_output
 
     def _build_primary(self) -> Model | str:
-        model = self.settings.model
+        _, raw = self._parse_model_name()
         if self.settings.base_url or self.settings.api_key:
-            raw = model.split(":", 1)[1] if model.startswith("openai:") else model
-            provider = OpenAIProvider(
+            model_name = raw if raw else self.settings.model
+            provider_obj = OpenAIProvider(
                 base_url=self.settings.base_url,
                 api_key=self.settings.api_key,
             )
-            return OpenAIChatModel(raw, provider=provider)
-        return model
+            return OpenAIChatModel(model_name, provider=provider_obj)
+        return self.settings.model
 
     def build_model(self) -> Model | str:
         primary = self._build_primary()

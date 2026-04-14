@@ -5,15 +5,15 @@ from pydantic_ai.models.test import TestModel
 from rich.console import Console
 
 from src.agent import AgentBuilder
-from src.cli.renderer import StreamRenderer
 from src.cli.turn import TurnRunner
+from src.cli.ui.renderer import StreamRenderer
 from src.model import HarnessSettings, ModelAdapter
 from src.policy import HarnessDeps
 from src.schema import FinalAnswer
-from src.sessions import SessionStore
+from src.session import UnifiedStore
 
 
-def _builder(settings: HarnessSettings, store: SessionStore) -> AgentBuilder:
+def _builder(settings: HarnessSettings, store: UnifiedStore) -> AgentBuilder:
     return AgentBuilder(settings, ModelAdapter(settings), store)
 
 
@@ -39,7 +39,7 @@ def test_model() -> TestModel:
 async def test_turn_runs_with_test_model(
     harness_deps: HarnessDeps,
     harness_settings: HarnessSettings,
-    session_store: SessionStore,
+    session_store: UnifiedStore,
     test_model: TestModel,
 ):
     builder = _builder(harness_settings, session_store)
@@ -57,7 +57,7 @@ async def test_turn_runs_with_test_model(
 async def test_turn_clears_repeat_guard(
     harness_deps: HarnessDeps,
     harness_settings: HarnessSettings,
-    session_store: SessionStore,
+    session_store: UnifiedStore,
     test_model: TestModel,
 ):
     builder = _builder(harness_settings, session_store)
