@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
-
 from src.policy import HarnessDeps
 from src.session import UnifiedStore
 

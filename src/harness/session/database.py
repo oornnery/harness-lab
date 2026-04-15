@@ -7,7 +7,6 @@ from typing import ClassVar
 
 from sqlalchemy import create_engine
 from sqlmodel import SQLModel
-
 from src.memory.schema import MemoryEntry
 
 from .schema import BackgroundJob, Event, Message, ScheduledTask, SessionModel, Todo

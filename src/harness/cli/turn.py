@@ -12,7 +12,6 @@ from pydantic_ai import (
     UsageLimits,
 )
 from rich.panel import Panel
-
 from src.agent import AgentHandle
 from src.model import HarnessSettings
 

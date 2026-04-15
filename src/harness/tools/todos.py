@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic_ai import ModelRetry, RunContext
-
 from src.policy import HarnessDeps
 
 Status = Literal["open", "doing", "done", "cancelled"]

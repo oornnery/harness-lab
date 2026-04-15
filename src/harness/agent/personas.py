@@ -7,7 +7,6 @@ from typing import Any
 
 import frontmatter
 from pydantic_ai import RunContext
-
 from src.policy import HarnessDeps
 
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"

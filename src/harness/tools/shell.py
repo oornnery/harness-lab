@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 
 from pydantic_ai import ModelRetry, RunContext
-
 from src.policy import HarnessDeps
 
 from ._clip import clip

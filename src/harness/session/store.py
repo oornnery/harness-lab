@@ -8,7 +8,6 @@ from typing import Any
 
 import sqlite_vec
 from pydantic_ai import ModelMessage
-
 from src.memory.schema import MemoryEntry
 
 from .database import DatabaseManager

@@ -17,7 +17,6 @@ from pydantic_ai.capabilities import (
 )
 from pydantic_ai.mcp import load_mcp_servers
 from pydantic_ai.toolsets import PrefixedToolset
-
 from src.hooks import build_harness_hooks
 from src.model import HarnessSettings, ModelAdapter
 from src.policy import HarnessDeps

@@ -6,7 +6,6 @@ from typing import Any
 
 from rich.console import Console
 from rich.text import Text
-
 from src.agent import PromptDocument
 from src.model import HarnessSettings
 

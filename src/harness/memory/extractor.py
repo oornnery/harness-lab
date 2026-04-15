@@ -7,7 +7,6 @@ from typing import cast
 
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
-
 from src.agent.personas import load_system_prompt
 
 from .schema import ExtractedMemories, MemoryEntry

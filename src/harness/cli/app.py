@@ -5,7 +5,6 @@ import contextlib
 import time
 
 from rich.console import Console
-
 from src.agent import AgentBuilder, AgentHandle
 from src.agent.watcher import PersonaWatcher
 from src.background import BackgroundRunner

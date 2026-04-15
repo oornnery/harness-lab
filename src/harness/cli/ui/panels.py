@@ -14,7 +14,6 @@ from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
-
 from src.agent import PromptDocument
 from src.model import HarnessSettings, ModelAdapter
 from src.schema import HarnessOutput

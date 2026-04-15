@@ -9,7 +9,6 @@ import asyncio
 from pathlib import Path
 
 from pydantic_ai import ModelRetry, RunContext
-
 from src.policy import HarnessDeps
 
 from ._clip import clip

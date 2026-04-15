@@ -10,7 +10,6 @@ from functools import cached_property
 from typing import Any
 
 import sqlite_vec
-
 from src.memory.schema import MemoryEntry
 
 _ST_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"

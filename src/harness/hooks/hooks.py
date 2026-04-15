@@ -15,7 +15,6 @@ from pydantic_ai import (
     ToolDefinition,
 )
 from pydantic_ai.capabilities.hooks import Hooks
-
 from src.memory.extractor import get_extractor
 from src.policy import HarnessDeps
 

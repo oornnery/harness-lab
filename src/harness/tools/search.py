@@ -9,7 +9,6 @@ import asyncio
 from pathlib import Path
 
 from pydantic_ai import RunContext
-
 from src.policy import HarnessDeps
 
 from .file import BINARY_EXTENSIONS

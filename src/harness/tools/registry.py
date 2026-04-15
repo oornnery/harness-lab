@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pydantic_ai import RunContext, Tool
-
 from src.policy import HarnessDeps
 
 from .background import BackgroundTools

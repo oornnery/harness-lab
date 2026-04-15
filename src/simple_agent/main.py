@@ -1,3 +1,8 @@
+"""
+Credits:
+- [Identity](https://www.youtube.com/watch?v=LykXu60aKoY)
+"""
+
 import os
 from dataclasses import dataclass, field
 from typing import Any

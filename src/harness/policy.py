@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 from pydantic_ai import (
     ModelRetry,
 )
-
 from src.memory import MemoryStore
 from src.session import UnifiedStore
 

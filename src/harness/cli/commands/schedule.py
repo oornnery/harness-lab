@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from rich.table import Table
-
 from src.scheduler import ScheduleParseError, parse_schedule
 
 from .base import ExtensionState

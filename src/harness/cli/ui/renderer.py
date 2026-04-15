@@ -33,7 +33,6 @@ from rich.padding import Padding
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
-
 from src.agent import PromptDocument
 from src.model import HarnessSettings, ModelAdapter
 from src.schema import FinalAnswer, HarnessOutput

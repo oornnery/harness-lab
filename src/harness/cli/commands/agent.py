@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pydantic_ai import UsageLimits
-
 from src.agent import list_personas, load_persona
 
 from .base import ExtensionState
