@@ -1078,6 +1078,7 @@ name = "harness-lab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "logfire" },
     { name = "pydantic-ai" },
     { name = "pydantic-ai-slim", extra = ["duckduckgo", "web-fetch"] },
@@ -1104,6 +1105,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "logfire", specifier = ">=4.32.0" },
     { name = "pydantic-ai", specifier = ">=1.80.0" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], specifier = ">=1.80.0" },
