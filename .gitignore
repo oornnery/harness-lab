@@ -12,3 +12,4 @@ build/
 .*_cache/
 .mcp.json
 .claude/
+.simple/
