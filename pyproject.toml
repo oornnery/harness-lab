@@ -1,32 +1,20 @@
 [project]
 name = "harness-lab"
 version = "0.1.0"
-description = "Educational coding-agent harness using PydanticAI"
+description = "My learning playground for building and testing agentic AI systems"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-    "logfire>=4.32.0",
-    "pydantic-ai>=1.80.0",
-    "pydantic-ai-slim[duckduckgo,web-fetch]>=1.80.0",
-    "pydantic-settings>=2.13.1",
-    "python-dotenv>=1.2.2",
-    "python-frontmatter>=1.1.0",
-    "rich>=15.0.0",
-    "sqlmodel>=0.0.38",
-    "sentence-transformers>=5.4.0",
-    "sqlite-vec>=0.1.9",
-    "httpx>=0.28.1",
-]
+dependencies = []
 
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-harness = "src.client.cli:main"
+simple = "apps.simple.src.main:main"
 
 [tool.ruff]
-line-length = 100
+line-length = 200
 target-version = "py312"
 
 [tool.ruff.lint]
@@ -35,6 +23,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv.workspace]
+members = ["apps/simple"]
 
 [dependency-groups]
 dev = [
