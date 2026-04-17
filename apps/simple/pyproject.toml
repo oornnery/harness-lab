@@ -4,4 +4,10 @@ version = "0.1.0"
 description = "The simple chat agent harness"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.28.1", "python-dotenv>=1.2.2", "rich>=15.0.0"]
+dependencies = [
+    "httpx>=0.28.1",
+    "netext>=0.4.1",
+    "python-dotenv>=1.2.2",
+    "rich>=15.0.0",
+    "rich-argparse>=1.7.2",
+]

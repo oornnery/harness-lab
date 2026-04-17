@@ -31,6 +31,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cachetools"
+version = "7.0.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/dd/57fe3fdb6e65b25a5987fd2cdc7e22db0aef508b91634d2e57d22928d41b/cachetools-7.0.5.tar.gz", hash = "sha256:0cd042c24377200c1dcd225f8b7b12b0ca53cc2c961b43757e774ebe190fd990", size = 37367, upload-time = "2026-03-09T20:51:29.451Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/f3/39cf3367b8107baa44f861dc802cbf16263c945b62d8265d36034fc07bea/cachetools-7.0.5-py3-none-any.whl", hash = "sha256:46bc8ebefbe485407621d0a4264b23c080cedd913921bad7ac3ed2f26c183114", size = 13918, upload-time = "2026-03-09T20:51:27.33Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.2.25"
 source = { registry = "https://pypi.org/simple" }
@@ -110,11 +119,6 @@ wheels = [
 name = "harness-lab"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
-    { name = "httpx" },
-    { name = "python-dotenv" },
-    { name = "rich" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -129,11 +133,6 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "rich", specifier = ">=15.0.0" },
-]
 
 [package.metadata.requires-dev]
 dev = [
@@ -251,6 +250,36 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e0/97/7022667073c99a0fe028f2e34b9bf76b49a611afd21b02527fbfd92d4cd5/mslex-1.3.0.tar.gz", hash = "sha256:641c887d1d3db610eee2af37a8e5abda3f70b3006cdfd2d0d29dc0d1ae28a85d", size = 11583, upload-time = "2024-10-16T13:16:18.523Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/f2/66bd65ca0139675a0d7b18f0bada6e12b51a984e41a76dbe44761bf1b3ee/mslex-1.3.0-py3-none-any.whl", hash = "sha256:c7074b347201b3466fc077c5692fbce9b5f62a63a51f537a53fbbd02eff2eea4", size = 7820, upload-time = "2024-10-16T13:16:17.566Z" },
+]
+
+[[package]]
+name = "netext"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cachetools" },
+    { name = "networkx" },
+    { name = "rich" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/85/5693a1ce91d550d3237db7052241318e0faa1bdfdf8cdcb96c34b0a9290a/netext-0.4.1.tar.gz", hash = "sha256:4e819b09feac0af162362da97896afe33893f9c1776d72a997a48f756e98041e", size = 279547, upload-time = "2026-04-02T10:56:53.999Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/88/0e4e3e018f0c6890147a9d790bc89664b83ef7cf158a9afc5a4e9852e9cb/netext-0.4.1-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:d8e0911ace7650d6099d6d49fd96b04c4ee0945a1bfc17f1de220781db30cef3", size = 570146, upload-time = "2026-04-02T10:56:42.617Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/5c/60591ca2a475e555c4c8585ffb0a313c85deb92d780cf8bca5c13b129b55/netext-0.4.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:696f98c938fb3dae0ac80c38b75f718a8e1cd7c01955f1f74580a575d3818435", size = 556070, upload-time = "2026-04-02T10:56:44.239Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/18/564045beeea4dc3cf6a62b118e6ce076c03aeb5957a337b2c450ba747a64/netext-0.4.1-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:534435e2750f1afd1acd4e056fb8b2d7b3b1007f2c1169b4ecd5cd92c4bd9e84", size = 597000, upload-time = "2026-04-02T10:56:45.626Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/6a/1bb2fa726256e551153624c182a4fd0aa018edbfcc7d9b388884caaef897/netext-0.4.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f0919904e1c4909b1e91d2b7402121c05af8dd040e78f192a0ea9f38efe12a13", size = 605833, upload-time = "2026-04-02T10:56:47.089Z" },
+    { url = "https://files.pythonhosted.org/packages/75/f5/d3ff794fb8688f789e4fa09da632312bb299f284dd24449cb2d30a13bda5/netext-0.4.1-cp310-abi3-musllinux_1_1_aarch64.whl", hash = "sha256:1732d9d137cf3729c1c45134bbe1936ebc756989d503b08feba127f37f59b2dd", size = 772753, upload-time = "2026-04-02T10:56:48.757Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/c7/e1c221a964f74c5d7427f9a31bab81b780c3efcd3a5b56672fa2bd00a69f/netext-0.4.1-cp310-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:f8f1e16e159f59e185ab4fc8b26397c64e9be7551a95f0be8edb3ecb177321d3", size = 814215, upload-time = "2026-04-02T10:56:50.497Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/77/05285343136fc97e82b7aba1488fdfcf0b6b4792a0c11843d9f0428247cc/netext-0.4.1-cp310-abi3-win_amd64.whl", hash = "sha256:3b122a3fa448cdd7dec0db073d410333c4531f4a0cc645e292851fa3a97801ed", size = 442702, upload-time = "2026-04-02T10:56:52.277Z" },
+]
+
+[[package]]
+name = "networkx"
+version = "3.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504, upload-time = "2025-12-08T17:02:38.159Z" },
 ]
 
 [[package]]
@@ -589,6 +618,18 @@ wheels = [
 ]
 
 [[package]]
+name = "rich-argparse"
+version = "1.7.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/f7/1c65e0245d4c7009a87ac92908294a66e7e7635eccf76a68550f40c6df80/rich_argparse-1.7.2.tar.gz", hash = "sha256:64fd2e948fc96e8a1a06e0e72c111c2ce7f3af74126d75c0f5f63926e7289cd1", size = 38500, upload-time = "2025-11-01T10:35:44.232Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/80/97b6f357ac458d9ad9872cc3183ca09ef7439ac89e030ea43053ba1294b6/rich_argparse-1.7.2-py3-none-any.whl", hash = "sha256:0559b1f47a19bbeb82bf15f95a057f99bcbbc98385532f57937f9fc57acc501a", size = 25476, upload-time = "2025-11-01T10:35:42.681Z" },
+]
+
+[[package]]
 name = "ruff"
 version = "0.15.10"
 source = { registry = "https://pypi.org/simple" }
@@ -634,15 +675,19 @@ version = "0.1.0"
 source = { virtual = "apps/simple" }
 dependencies = [
     { name = "httpx" },
+    { name = "netext" },
     { name = "python-dotenv" },
     { name = "rich" },
+    { name = "rich-argparse" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "netext", specifier = ">=0.4.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=15.0.0" },
+    { name = "rich-argparse", specifier = ">=1.7.2" },
 ]
 
 [[package]]
