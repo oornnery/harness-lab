@@ -197,6 +197,7 @@ async def run_memory_agent(turn_text: str, agent: Agent) -> None:  # type: ignor
         mem_agent: Agent[MemoryDecision] = Agent(
             config=agent.config,
             response_model=MemoryDecision,
+            use_tools=False,  # no tool dispatch in memory agent; avoid policy prompts
         )
         decision = await mem_agent.chat(_MEMORY_PROMPT.format(turn=turn_text))
         parsed = decision.parsed

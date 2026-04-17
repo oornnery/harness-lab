@@ -212,12 +212,14 @@ class Agent(Generic[T]):  # noqa: UP046
         response_model: type[T] = Reply,  # type: ignore[assignment]  # ty: ignore[invalid-parameter-default]
         max_tool_iterations: int = 10,
         policy: Any = None,
+        use_tools: bool = True,
     ) -> None:
         self.config = config or AgentConfig()
         self.messages: list[dict[str, Any]] = list(messages) if messages else []
         self.response_model: type[T] = response_model
         self.max_tool_iterations = max_tool_iterations
         self._policy = policy
+        self.use_tools = use_tools
         self.session_usage = ChatUsage()
         self.turns = 0
         self._compact_snapshot: list[dict[str, Any]] | None = None
@@ -346,16 +348,17 @@ class Agent(Generic[T]):  # noqa: UP046
 
     def _build_payload(self, params: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         from .tools import tools_schema
-        tools = tools_schema()
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": self.system_prompt + self.messages,
             **(params or {}),
             **kwargs,
         }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        if self.use_tools:
+            tools = tools_schema()
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
         if self.response_model is not Reply:
             adapter: TypeAdapter[T] = TypeAdapter(self.response_model)
             payload["response_format"] = {

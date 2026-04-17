@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .utils import logger
 
-__all__ = ["Policy", "ToolDenied", "load_policy", "save_policy"]
+__all__ = ["DEFAULT_POLICY", "Policy", "ToolDenied", "load_policy", "save_policy"]
 
 POLICY_FILE = Path.cwd() / ".tooled" / "policy.json"
 
@@ -50,9 +50,15 @@ class Policy(BaseModel):
         return Policy(allow=allow, confirm=confirm, deny=deny)
 
 
+# Catalog defaults -- tools safe to run without prompting
+_DEFAULT_ALLOW = {"read_file", "list_dir", "grep", "web_search", "remember", "recall"}
+_DEFAULT_CONFIRM = {"write_file", "shell", "fetch"}
+DEFAULT_POLICY = Policy(allow=_DEFAULT_ALLOW, confirm=_DEFAULT_CONFIRM)
+
+
 def load_policy() -> Policy:
     if not POLICY_FILE.exists():
-        return Policy()
+        return DEFAULT_POLICY
     try:
         data = json.loads(POLICY_FILE.read_text())
         return Policy.model_validate(data)
