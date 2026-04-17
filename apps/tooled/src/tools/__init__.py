@@ -121,4 +121,4 @@ async def dispatch_tool(call: ToolCall) -> str:
 
 
 # import catalog modules so their @tool decorators register on import
-from . import fs, shell, web  # noqa: E402, F401
+from . import agent_tool, fs, shell, web  # noqa: E402, F401

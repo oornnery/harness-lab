@@ -7,6 +7,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Generic, TypeVar
@@ -14,6 +15,7 @@ from typing import Any, Generic, TypeVar
 import httpx
 from pydantic import BaseModel, TypeAdapter
 
+from .hooks import ToolCall
 from .utils import logger
 
 ChatMessage = dict[str, Any]
@@ -31,6 +33,9 @@ __all__ = [
     "Reply",
     "Thinking",
 ]
+
+# Set to current Agent before each tool dispatch, reset after; lets tools access parent agent.
+_agent_ctx: ContextVar[Any] = ContextVar("agent_ctx")
 
 MAX_ATTEMPTS = 3
 MODELS_CACHE_TTL = 60.0
@@ -220,6 +225,8 @@ class Agent(Generic[T]):  # noqa: UP046
         self.max_tool_iterations = max_tool_iterations
         self._policy = policy
         self.use_tools = use_tools
+        self.disabled_tools: set[str] = set()
+        self.confirm_fn: Callable[[ToolCall], bool] | None = None
         self.session_usage = ChatUsage()
         self.turns = 0
         self._compact_snapshot: list[dict[str, Any]] | None = None
@@ -295,8 +302,15 @@ class Agent(Generic[T]):  # noqa: UP046
         if len(self.messages) < keep_last + 4:
             return None
         snapshot = list(self.messages)
-        to_keep = self.messages[-keep_last:]
-        self.messages = self.messages[:-keep_last]
+        to_keep = list(self.messages[-keep_last:])
+        # Extend left to avoid splitting assistant(tool_calls) -> tool pairs
+        while to_keep and to_keep[0].get("role") == "tool":
+            pivot = len(self.messages) - len(to_keep) - 1
+            if pivot >= 0:
+                to_keep.insert(0, self.messages[pivot])
+            else:
+                break
+        self.messages = self.messages[: len(self.messages) - len(to_keep)]
         summarized = len(self.messages)
         try:
             summary = await self.chat(COMPACT_PROMPT, params={"temperature": 0.3})
@@ -355,7 +369,10 @@ class Agent(Generic[T]):  # noqa: UP046
             **kwargs,
         }
         if self.use_tools:
-            tools = tools_schema()
+            tools = [
+                t for t in tools_schema()
+                if t["function"]["name"] not in self.disabled_tools
+            ]
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
@@ -381,11 +398,8 @@ class Agent(Generic[T]):  # noqa: UP046
             return None  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
 
     async def _dispatch_tool_calls(self, raw_calls: list[dict[str, Any]]) -> None:
-        from rich.prompt import Confirm
-
-        from .hooks import ToolCall
+        # lazy import: tools.agent_tool imports agent, so top-level import would be circular
         from .tools import dispatch_tool
-        from .utils import console
 
         allow_calls: list[tuple[str, ToolCall]] = []
         confirm_calls: list[tuple[str, ToolCall]] = []
@@ -410,27 +424,26 @@ class Agent(Generic[T]):  # noqa: UP046
             else:
                 allow_calls.append((raw["id"], call))
 
-        if allow_calls:
-            results = await asyncio.gather(*[dispatch_tool(c) for _, c in allow_calls])
-            for (tc_id, _), result in zip(allow_calls, results, strict=True):
-                self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+        token = _agent_ctx.set(self)
+        try:
+            if allow_calls:
+                results = await asyncio.gather(*[dispatch_tool(c) for _, c in allow_calls])
+                for (tc_id, _), result in zip(allow_calls, results, strict=True):
+                    self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
 
-        for tc_id, call in confirm_calls:
-            approved = Confirm.ask(
-                f"[yellow]Allow tool[/yellow] [cyan]{call.name}[/cyan] "
-                f"with args [dim]{call.args}[/dim]?",
-                console=console,
-                default=False,
-            )
-            if not approved:
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": f"Tool {call.name!r} was denied by the user",
-                })
-            else:
-                result = await dispatch_tool(call)
-                self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+            for tc_id, call in confirm_calls:
+                approved = self.confirm_fn(call) if self.confirm_fn is not None else False
+                if not approved:
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": f"Tool {call.name!r} was denied by the user",
+                    })
+                else:
+                    result = await dispatch_tool(call)
+                    self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+        finally:
+            _agent_ctx.reset(token)
 
     async def chat(
         self,

@@ -9,11 +9,13 @@ from dotenv import load_dotenv
 from rich.console import Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.prompt import Confirm
 from rich.text import Text
 from rich_argparse import RichHelpFormatter
 
 from .agent import Agent, AgentConfig, AgentError, ChatResponse
 from .commands import KEEP_LAST_DEFAULT, build_help, dispatch, status_banner
+from .hooks import ToolCall
 from .prompt import cancel_turn, init_readline, read_input, save_history
 from .session import SessionState, autosave_session, ensure_session_id, latest_session_id, load_session, log_turn
 from .utils import console, thinking_progress
@@ -145,6 +147,14 @@ async def _async_main() -> None:
         config.instructions = args.instructions.strip()
 
     async with Agent(config=config) as agent:
+        def _confirm(call: ToolCall) -> bool:
+            return Confirm.ask(
+                f"[yellow]Allow tool[/yellow] [cyan]{call.name}[/cyan] "
+                f"with args [dim]{call.args}[/dim]?",
+                console=console,
+                default=False,
+            )
+        agent.confirm_fn = _confirm
         init_readline(agent)
         target_sid = args.session
         if not target_sid and args.resume:

@@ -40,7 +40,7 @@ COMMANDS_HELP: list[tuple[str, str]] = [
     ("/edit", "drop last assistant reply and re-edit last user turn"),
     ("/history [N]", "show last N messages"),
     ("/export [path]", "export conversation as markdown"),
-    ("/tools [<name>]", "list registered tools or show details"),
+    ("/tools [enable|disable <name>]", "list tools or enable/disable by name"),
     ("/memory [list|recall <q>|add <text>|clear]", "manage memory tiers"),
     ("/policy [show|allow|confirm|deny <tool>]", "view or update tool policy"),
     ("/hooks", "list registered hooks"),
@@ -333,6 +333,16 @@ def _cmd_export(agent: Agent[Any], state: SessionState, arg: str) -> bool:
 @register("/tools")
 def _cmd_tools(agent: Agent[Any], state: SessionState, arg: str) -> bool:
     from .tools import registry_list
+    sub, _, name = arg.partition(" ")
+    sub = sub.lower()
+    if sub in ("enable", "disable") and name.strip():
+        name = name.strip()
+        if sub == "disable":
+            agent.disabled_tools.add(name)
+        else:
+            agent.disabled_tools.discard(name)
+        console.print(f"[dim]{name} {sub}d[/dim]")
+        return False
     entries = registry_list()
     if not entries:
         console.print("[dim]No tools registered.[/dim]")
@@ -340,8 +350,10 @@ def _cmd_tools(agent: Agent[Any], state: SessionState, arg: str) -> bool:
     table = Table.grid(padding=(0, 2))
     table.add_column(style="cyan", no_wrap=True)
     table.add_column(style="dim")
+    table.add_column(style="yellow", no_wrap=True)
     for e in entries:
-        table.add_row(e["name"], e["desc"] or "")
+        status = "disabled" if e["name"] in agent.disabled_tools else ""
+        table.add_row(e["name"], e["desc"] or "", status)
     console.print(table)
     return False
 
