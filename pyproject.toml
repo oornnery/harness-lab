@@ -12,6 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 simple = "apps.simple.src.main:main"
+tooled = "apps.tooled.src.main:main"
 
 [tool.ruff]
 line-length = 200
@@ -25,7 +26,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.uv.workspace]
-members = ["apps/simple"]
+members = [
+    "apps/simple",
+    "apps/tooled",
+]
 
 [dependency-groups]
 dev = [
