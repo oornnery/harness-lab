@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import tool
+from ..core.tool import tool
 
 _READ_LIMIT = 100 * 1024  # 100 KB
 

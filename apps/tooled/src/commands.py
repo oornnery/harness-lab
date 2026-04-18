@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -10,15 +11,23 @@ from rich.markdown import Markdown
 from rich.prompt import Confirm
 from rich.table import Table
 
-from .agent import Agent, Thinking
-from .session import (
+from .core.agents import Agent, Thinking
+from .core.hooks import hooks_list
+from .core.memory import forget, memory_clear, memory_list
+from .core.memory import recall as mem_recall
+from .core.memory import remember as mem_remember
+from .core.policy import save_policy
+from .core.providers import get_provider, list_providers
+from .core.session import (
     SessionState,
     export_markdown,
     list_sessions,
     load_session,
     reset_sessions,
 )
-from .utils import console, thinking_progress
+from .core.tool import registry_list
+from .core.utils import console, thinking_progress
+from .diagram import render
 
 type MaybeAsync = bool | Coroutine[Any, Any, bool]
 Command = Callable[["Agent[Any]", SessionState, str], MaybeAsync]
@@ -42,8 +51,12 @@ COMMANDS_HELP: list[tuple[str, str]] = [
     ("/export [path]", "export conversation as markdown"),
     ("/tools [enable|disable <name>]", "list tools or enable/disable by name"),
     ("/memory [list|recall <q>|add <text>|clear]", "manage memory tiers"),
-    ("/policy [show|allow|confirm|deny <tool>]", "view or update tool policy"),
+    ("/policy [show|allow|confirm|deny|condition <tool> [pattern]]", "view or update tool policy"),
+    ("/config", "show current TOML config, roles, providers"),
+    ("/provider [<name>]", "list or switch active provider"),
+    ("/role [<name>]", "show or switch agent role (hot-swap model)"),
     ("/hooks", "list registered hooks"),
+    ("/diagram [flow|lifecycle|all]", "render architecture diagrams"),
     ("/quit, /exit", "leave chat (autosaves)"),
 ]
 
@@ -101,6 +114,7 @@ def status_banner(state: SessionState, agent: Agent[Any] | None = None) -> str:
     if agent is not None:
         sid = state.current_id or "new"
         parts.append(f"session={sid}")
+        parts.append(f"provider={agent.config.provider.name}")
         parts.append(f"model={agent.config.model}")
     parts.append(f"stream={'on' if state.stream_mode else 'off'}")
     parts.append(f"thinking={thinking}")
@@ -236,13 +250,57 @@ def _cmd_params(agent: Agent[Any], state: SessionState, arg: str) -> bool:
 
 @register("/model")
 async def _cmd_model(agent: Agent[Any], state: SessionState, arg: str) -> bool:
+    current = agent.config.model
     if not arg:
-        current = agent.config.model
-        for mid in await agent.models():
-            marker = " [bold green](current)[/bold green]" if mid == current else ""
-            console.print(f"  {mid}{marker}")
+        preset_names: set[str] = set()
+        prov_spec = agent.runtime.providers.get(agent.config.provider.name) if agent.runtime else None
+        if prov_spec and prov_spec.models:
+            console.print("[bold]config:[/bold]")
+            for m in prov_spec.models:
+                preset_names.add(m.name)
+                tags: list[str] = []
+                if m.name == prov_spec.default_model:
+                    tags.append("[yellow]default[/yellow]")
+                if m.name == current:
+                    tags.append("[bold green]current[/bold green]")
+                settings = []
+                if m.temperature is not None:
+                    settings.append(f"temp={m.temperature}")
+                if m.max_tokens is not None:
+                    settings.append(f"max_tokens={m.max_tokens}")
+                if m.thinking is not None:
+                    settings.append(f"thinking={m.thinking}")
+                tag_str = " ".join(tags)
+                set_str = f" [dim]{', '.join(settings)}[/dim]" if settings else ""
+                console.print(f"  {m.name} {tag_str}{set_str}")
+        try:
+            api_models = await agent.models()
+        except Exception:
+            api_models = []
+        if api_models:
+            non_preset = [m for m in api_models if m not in preset_names]
+            if non_preset or not preset_names:
+                console.print("[bold]api:[/bold]")
+                for mid in api_models:
+                    if mid in preset_names:
+                        continue
+                    marker = " [bold green](current)[/bold green]" if mid == current else ""
+                    console.print(f"  {mid}{marker}")
+        if not preset_names and not api_models:
+            console.print("[dim]No models available.[/dim]")
         return False
     agent.config.model = arg
+    if agent.runtime:
+        prov_spec = agent.runtime.providers.get(agent.config.provider.name)
+        if prov_spec:
+            preset = prov_spec.find_model(arg)
+            if preset:
+                if preset.temperature is not None:
+                    agent.config.temperature = preset.temperature
+                if preset.max_tokens is not None:
+                    agent.config.max_tokens = preset.max_tokens
+                if preset.thinking is not None:
+                    state.params["reasoning_effort"] = Thinking(preset.thinking)
     console.print(f"[dim]model = {arg}[/dim]")
     return False
 
@@ -332,7 +390,6 @@ def _cmd_export(agent: Agent[Any], state: SessionState, arg: str) -> bool:
 
 @register("/tools")
 def _cmd_tools(agent: Agent[Any], state: SessionState, arg: str) -> bool:
-    from .tools import registry_list
     sub, _, name = arg.partition(" ")
     sub = sub.lower()
     if sub in ("enable", "disable") and name.strip():
@@ -360,9 +417,6 @@ def _cmd_tools(agent: Agent[Any], state: SessionState, arg: str) -> bool:
 
 @register("/memory")
 def _cmd_memory(agent: Agent[Any], state: SessionState, arg: str) -> bool:
-    from .memory import forget, memory_clear, memory_list
-    from .memory import recall as mem_recall
-    from .memory import remember as mem_remember
     sub, _, rest = arg.partition(" ")
     sub = sub.lower()
     if not sub or sub == "list":
@@ -403,8 +457,7 @@ def _cmd_memory(agent: Agent[Any], state: SessionState, arg: str) -> bool:
 
 @register("/policy")
 def _cmd_policy(agent: Agent[Any], state: SessionState, arg: str) -> bool:
-    from .policy import save_policy
-    sub, _, tool_name = arg.partition(" ")
+    sub, _, rest = arg.partition(" ")
     sub = sub.lower()
     if not sub or sub == "show":
         p = agent.policy
@@ -412,25 +465,45 @@ def _cmd_policy(agent: Agent[Any], state: SessionState, arg: str) -> bool:
         console.print(f"  allow:   {sorted(p.allow) or '(none)'}")
         console.print(f"  confirm: {sorted(p.confirm) or '(none)'}")
         console.print(f"  deny:    {sorted(p.deny) or '(none)'}")
+        if p.conditions:
+            console.print("[bold]Conditions[/bold] (substring match on args)")
+            for tool_name, patterns in p.conditions.items():
+                console.print(f"  {tool_name}: {patterns}")
         return False
     if sub in ("allow", "confirm", "deny"):
-        tool_name = tool_name.strip()
+        tool_name = rest.strip()
         if not tool_name:
             console.print(f"[red]Usage:[/red] /policy {sub} <tool>")
             return False
         new_policy = agent.policy.with_verdict(tool_name, sub)  # type: ignore[arg-type]
-        agent._policy = new_policy
+        agent.set_policy(new_policy)
         save_policy(new_policy)
         console.print(f"[dim]{tool_name} -> {sub}[/dim]")
         return False
-    console.print(f"[red]Unknown subcommand:[/red] {sub}. Use: show, allow, confirm, deny")
+    if sub == "condition":
+        tool_name, _, pattern = rest.partition(" ")
+        tool_name = tool_name.strip()
+        pattern = pattern.strip()
+        if not tool_name or not pattern:
+            console.print("[red]Usage:[/red] /policy condition <tool> <substring>")
+            return False
+        new_policy = agent.policy.with_condition(tool_name, pattern)
+        agent.set_policy(new_policy)
+        save_policy(new_policy)
+        console.print(f"[dim]condition added: {tool_name} -> {pattern!r}[/dim]")
+        return False
+    console.print(f"[red]Unknown subcommand:[/red] {sub}. Use: show, allow, confirm, deny, condition")
     return False
 
 
 @register("/hooks")
 def _cmd_hooks(agent: Agent[Any], state: SessionState, arg: str) -> bool:
-    from .hooks import hooks_list
     rows = hooks_list()
+    if agent._local_hooks:
+        rows.extend(
+            {"phase": phase, "name": getattr(fn, "__name__", repr(fn)), "tool": scope or "*"}
+            for phase, fn, scope in agent.local_hooks
+        )
     if not rows:
         console.print("[dim]No hooks registered.[/dim]")
         return False
@@ -441,4 +514,95 @@ def _cmd_hooks(agent: Agent[Any], state: SessionState, arg: str) -> bool:
     for r in rows:
         table.add_row(r["phase"], r["name"], r["tool"])
     console.print(table)
+    return False
+
+
+@register("/config")
+def _cmd_config(agent: Agent[Any], state: SessionState, arg: str) -> bool:
+    if agent.runtime is None:
+        console.print("[dim]No TOML config loaded (single-provider mode).[/dim]")
+        return False
+    rt = agent.runtime
+    console.print(f"[bold]default_role:[/bold] {rt.default_role}")
+    console.print("[bold]providers:[/bold]")
+    for name, spec in rt.providers.items():
+        url_src = spec.base_url or f"env:{spec.base_url_env}"
+        console.print(f"  {name}: {url_src} key_env={spec.api_key_env}")
+    console.print("[bold]roles:[/bold]")
+    for name, role in rt.roles.items():
+        model_src = role.model or f"env:{role.model_env}"
+        console.print(f"  {name}: provider={role.provider} model={model_src}")
+    if rt.tools:
+        console.print("[bold]tool scoping:[/bold]")
+        for role, spec in rt.tools.items():
+            console.print(f"  {role}: allow={spec.allow} deny={spec.deny}")
+    return False
+
+
+@register("/provider")
+async def _cmd_provider(agent: Agent[Any], state: SessionState, arg: str) -> bool:
+    if agent.runtime is None:
+        console.print("[dim]No TOML config loaded (single-provider mode).[/dim]")
+        return False
+    available = list_providers()
+    if not arg.strip():
+        current = agent.config.provider.name
+        for name in available:
+            marker = " <--" if name == current else ""
+            p = get_provider(name)
+            console.print(f"  {name}: {p.base_url}{marker}")
+        return False
+    name = arg.strip()
+    if name not in available:
+        console.print(f"[red]Unknown provider:[/red] {name}. Available: {', '.join(available)}")
+        return False
+    new_prov = get_provider(name)
+    agent.config.provider = new_prov
+    prov_spec = agent.runtime.providers.get(name)
+    new_model: str | None = None
+    if prov_spec and prov_spec.default_model:
+        new_model = prov_spec.default_model
+    else:
+        for _role, role_spec in agent.runtime.roles.items():
+            if role_spec.provider == name:
+                with contextlib.suppress(ValueError):
+                    new_model = role_spec.resolve_model()
+                break
+    if new_model:
+        agent.config.model = new_model
+    await agent.client.aclose()
+    agent.client = new_prov.build_client(agent.config.connect_timeout, agent.config.read_timeout)
+    console.print(f"[dim]switched to provider={name} model={agent.config.model} base_url={new_prov.base_url}[/dim]")
+    return False
+
+
+@register("/role")
+async def _cmd_role(agent: Agent[Any], state: SessionState, arg: str) -> bool:
+    if agent.runtime is None:
+        console.print("[dim]No TOML config loaded (single-provider mode).[/dim]")
+        return False
+    if not arg.strip():
+        # show current role info
+        console.print(f"[dim]Current model: {agent.config.model} (provider: {agent.config.provider.name})[/dim]")
+        console.print(f"[dim]Available roles: {', '.join(agent.runtime.roles)}[/dim]")
+        return False
+    role_name = arg.strip()
+    if role_name not in agent.runtime.roles:
+        console.print(f"[red]Unknown role:[/red] {role_name}. Available: {', '.join(agent.runtime.roles)}")
+        return False
+    new_cfg = agent.config_for_role(role_name)
+    await agent.aclose()
+    agent.config = new_cfg
+    agent.client = agent.config.provider.build_client(agent.config.connect_timeout, agent.config.read_timeout)
+    console.print(f"[dim]switched to role={role_name} model={new_cfg.model} provider={new_cfg.provider.name}[/dim]")
+    return False
+
+
+@register("/diagram")
+async def _cmd_diagram(agent: Agent[Any], state: SessionState, arg: str) -> bool:
+    which = arg.strip() or "all"
+    if which not in ("flow", "lifecycle", "all"):
+        console.print(f"[red]Unknown diagram:[/red] {which}. Use flow, lifecycle, or all.")
+        return False
+    render(which)
     return False

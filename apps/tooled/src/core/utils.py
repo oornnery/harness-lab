@@ -1,5 +1,3 @@
-"""Shared singletons: Rich console + logging configured with RichHandler."""
-
 import logging
 
 from rich.console import Console
@@ -7,6 +5,8 @@ from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 console = Console()
+
+_log_console = Console(stderr=True)
 
 
 def thinking_progress(label: str = "Thinking...") -> Progress:
@@ -25,7 +25,7 @@ logging.basicConfig(
     datefmt="[%X]",
     handlers=[
         RichHandler(
-            console=console,
+            console=_log_console,
             rich_tracebacks=True,
             markup=False,
             show_path=False,
@@ -37,6 +37,5 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("rich")
-
 
 __all__ = ["console", "logger", "thinking_progress"]

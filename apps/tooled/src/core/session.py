@@ -5,13 +5,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
-from .agent import Agent, ChatMessage, ChatParams, ChatUsage
+from .agents import Agent, ChatMessage, ChatParams, ChatUsage
 from .utils import logger
 
-SIMPLE_HOME = Path.cwd() / ".tooled"
-SESSIONS_DIR = SIMPLE_HOME / "sessions"
-EXPORTS_DIR = SIMPLE_HOME / "exports"
-TRANSCRIPT = SIMPLE_HOME / "transcript.jsonl"
+TOOLED_HOME = Path.cwd() / ".tooled"
+SESSIONS_DIR = TOOLED_HOME / "sessions"
+EXPORTS_DIR = TOOLED_HOME / "exports"
+TRANSCRIPT = TOOLED_HOME / "transcript.jsonl"
 
 
 @dataclass
@@ -111,17 +111,19 @@ def autosave_session(agent: Agent, state: SessionState) -> Path | None:
 
 def list_sessions() -> list[Path]:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(SESSIONS_DIR.glob("*.json"), key=lambda p: _safe_json(p).get("created_at", ""))
+    files = list(SESSIONS_DIR.glob("*.json"))
+    decorated = [(_safe_json(p).get("created_at", ""), p) for p in files]
+    decorated.sort(key=lambda item: item[0])
+    return [p for _, p in decorated]
 
 
 def latest_session_id() -> str | None:
-    """Return the id of the most recently updated session, or None."""
+    """Return the id of the most recently modified session, or None."""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     files = list(SESSIONS_DIR.glob("*.json"))
     if not files:
         return None
-    latest = max(files, key=lambda p: _safe_json(p).get("updated_at") or _safe_json(p).get("created_at") or "")
-    return latest.stem
+    return max(files, key=lambda p: p.stat().st_mtime).stem
 
 
 def load_session(sid: str, agent: Agent, state: SessionState) -> bool:
@@ -150,6 +152,7 @@ def log_turn(
     model: str | None = None,
     usage: ChatUsage | None = None,
     response_time: float | None = None,
+    agent_role: str | None = None,
 ) -> None:
     TRANSCRIPT.parent.mkdir(parents=True, exist_ok=True)
     entry: dict = {
@@ -157,6 +160,8 @@ def log_turn(
         "role": role,
         "content": content,
     }
+    if agent_role is not None:
+        entry["agent_role"] = agent_role
     if session_id is not None:
         entry["session_id"] = session_id
     if model is not None:

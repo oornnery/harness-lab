@@ -7,16 +7,23 @@ import random
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import httpx
 from pydantic import BaseModel, TypeAdapter
 
+from ._context import RunContext
 from .hooks import ToolCall
+from .memory import MemoryDecision, remember_impl
+from .policy import load_policy
+from .providers import Provider, get_provider
+from .tool import dispatch_tool, registry_list, tools_schema
 from .utils import logger
+
+if TYPE_CHECKING:
+    from .config import RuntimeConfig
 
 ChatMessage = dict[str, Any]
 ChatParams = dict[str, Any]
@@ -30,19 +37,19 @@ __all__ = [
     "ChatResponse",
     "ChatUsage",
     "CompactResult",
+    "ModelRetry",
     "Reply",
+    "RunContext",
     "Thinking",
+    "run_memory_agent",
 ]
-
-# Set to current Agent before each tool dispatch, reset after; lets tools access parent agent.
-_agent_ctx: ContextVar[Any] = ContextVar("agent_ctx")
 
 MAX_ATTEMPTS = 3
 MODELS_CACHE_TTL = 60.0
 SYSTEM_PROMPT = (
-    "You are a helpful assistant that provides accurate and concise answers to user."
-    "Always provide clear and relevant information based on the user's input."
-    "You should not make up information. If you don't know the answer, say you don't know."
+    "You are a helpful assistant that provides accurate and concise answers to the user. "
+    "Always provide clear and relevant information based on the user's input. "
+    "You should not make up information. If you don't know the answer, say you don't know. "
     "You should respond in the language of the user."
 )
 COMPACT_PROMPT = (
@@ -51,6 +58,22 @@ COMPACT_PROMPT = (
 )
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _format_history(messages: list[dict[str, Any]]) -> str:
+    """Flatten messages into a plain-text transcript for the compact sub-agent."""
+    lines: list[str] = []
+    for m in messages:
+        role = m.get("role", "?")
+        content = m.get("content") or ""
+        if role == "tool":
+            lines.append(f"[tool:{m.get('name', '?')}] {content}")
+        elif role == "assistant" and m.get("tool_calls"):
+            names = ", ".join(tc.get("function", {}).get("name", "?") for tc in m["tool_calls"])
+            lines.append(f"[assistant tool_calls={names}] {content}")
+        else:
+            lines.append(f"[{role}] {content}")
+    return "\n".join(lines)
 
 
 class Reply(BaseModel):
@@ -88,6 +111,10 @@ class AgentError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.clean_message = _clean_error_message(message)
+
+
+class ModelRetry(Exception):
+    """Raised when structured output fails validation; triggers a model retry."""
 
 
 @asynccontextmanager
@@ -192,34 +219,51 @@ class CompactResult:
 
 @dataclass
 class AgentConfig:
-    model: str = field(default_factory=lambda: os.getenv("MODEL", "gpt-4"))
-    base_url: str = field(default_factory=lambda: os.getenv("BASE_URL", "https://api.openai.com/v1"))
-    api_key: str = field(default_factory=lambda: os.getenv("API_KEY", ""))
+    provider: Provider
+    model: str
     system_prompt: str = SYSTEM_PROMPT
     instructions: str = ""
+    temperature: float | None = None
+    max_tokens: int | None = None
     connect_timeout: float = field(default_factory=lambda: float(os.getenv("CONNECT_TIMEOUT", "10")))
     read_timeout: float = field(default_factory=lambda: float(os.getenv("READ_TIMEOUT", "60")))
     stream_read_timeout: float | None = field(default_factory=lambda: _optional_float(os.getenv("STREAM_READ_TIMEOUT")))
+    max_output_retries: int = 2
 
     def __post_init__(self) -> None:
-        if not self.api_key:
-            raise ValueError("API key is required. Please set the API_KEY environment variable.")
-        self.base_url = self.base_url.rstrip("/")
+        if not self.provider.api_key:
+            logger.warning(
+                "Provider %r has empty api_key. Set %s env var if auth is required.",
+                self.provider.name,
+                "the configured" if not self.provider.api_key else "",
+            )
         if self.instructions:
             self.instructions = self.instructions.strip()
+
+    @classmethod
+    def from_role(cls, runtime: RuntimeConfig, role_name: str) -> AgentConfig:
+        role = runtime.role(role_name)
+        prov = get_provider(role.provider)
+        return cls(
+            provider=prov,
+            model=role.resolve_model(),
+            instructions=role.instructions or "",
+            temperature=role.temperature,
+            max_tokens=role.max_tokens,
+        )
 
 
 class Agent(Generic[T]):  # noqa: UP046
     def __init__(
         self,
-        config: AgentConfig | None = None,
+        config: AgentConfig,
         messages: list[dict[str, Any]] | None = None,
         response_model: type[T] = Reply,  # type: ignore[assignment]  # ty: ignore[invalid-parameter-default]
         max_tool_iterations: int = 10,
         policy: Any = None,
         use_tools: bool = True,
     ) -> None:
-        self.config = config or AgentConfig()
+        self.config = config
         self.messages: list[dict[str, Any]] = list(messages) if messages else []
         self.response_model: type[T] = response_model
         self.max_tool_iterations = max_tool_iterations
@@ -227,22 +271,18 @@ class Agent(Generic[T]):  # noqa: UP046
         self.use_tools = use_tools
         self.disabled_tools: set[str] = set()
         self.confirm_fn: Callable[[ToolCall], bool] | None = None
+        self.toolset: Any = None  # Toolset | None -- set per-agent
+        self.tool_filter: Callable[[Any, Any], bool] | None = None
+        self.deps: Any = None
+        self._local_hooks: list[tuple[str, Any, str | None]] = []  # (phase, fn, tool|None)
+        self.runtime: RuntimeConfig | None = None
         self.session_usage = ChatUsage()
         self.turns = 0
         self._compact_snapshot: list[dict[str, Any]] | None = None
         self._models_cache: tuple[float, list[str]] | None = None
-        self.client = httpx.AsyncClient(
-            base_url=self.config.base_url,
-            headers={
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=httpx.Timeout(
-                connect=self.config.connect_timeout,
-                read=self.config.read_timeout,
-                write=self.config.connect_timeout,
-                pool=self.config.connect_timeout,
-            ),
+        self.client = self.config.provider.build_client(
+            self.config.connect_timeout,
+            self.config.read_timeout,
         )
 
     @property
@@ -255,15 +295,47 @@ class Agent(Generic[T]):  # noqa: UP046
     @property
     def policy(self) -> Any:
         if self._policy is None:
-            from .policy import load_policy
             self._policy = load_policy()
         return self._policy
+
+    def set_policy(self, policy: Any) -> None:
+        self._policy = policy
+
+    @property
+    def local_hooks(self) -> list[tuple[str, Any, str | None]]:
+        return list(self._local_hooks)
 
     def reset(self) -> None:
         self.messages = []
         self.session_usage = ChatUsage()
         self.turns = 0
         self._compact_snapshot = None
+
+    def add_hook(self, phase: str, fn: Any, *, tool: str | None = None) -> None:
+        self._local_hooks.append((phase, fn, tool))
+
+    def config_for_role(self, role_name: str) -> AgentConfig:
+        """Return AgentConfig for `role_name`, or own config if role/runtime absent."""
+        if self.runtime is None or role_name not in self.runtime.roles:
+            if self.runtime is not None:
+                logger.debug("role %r not in runtime; falling back to own config", role_name)
+            return self.config
+        return AgentConfig.from_role(self.runtime, role_name)
+
+    def scoped_disabled_tools(self, role_name: str) -> set[str]:
+        """Tools to disable for a sub-agent running under `role_name` per runtime.tools scoping."""
+        if self.runtime is None:
+            return set()
+        spec = self.runtime.tools.get(role_name)
+        if spec is None:
+            return set()
+        disabled: set[str] = set(spec.deny)
+        if spec.allow is not None:
+            for entry in registry_list():
+                name = entry["name"]
+                if name and name not in spec.allow:
+                    disabled.add(name)
+        return disabled
 
     def _track(self, resp: ChatResponse[T]) -> ChatResponse[T]:
         self.session_usage += resp.usage
@@ -312,11 +384,19 @@ class Agent(Generic[T]):  # noqa: UP046
                 break
         self.messages = self.messages[: len(self.messages) - len(to_keep)]
         summarized = len(self.messages)
+        compact_cfg = self.config_for_role("compact")
+        history_text = _format_history(snapshot)
+        sub: Agent[Reply] = Agent(config=compact_cfg, use_tools=False)
+        sub.runtime = self.runtime
         try:
-            summary = await self.chat(COMPACT_PROMPT, params={"temperature": 0.3})
+            summary = await sub.chat(f"{COMPACT_PROMPT}\n\n{history_text}")
         except Exception:
             self.messages = snapshot
+            await sub.aclose()
             raise
+        finally:
+            if not sub.client.is_closed:
+                await sub.aclose()
         self.messages = [
             {"role": "system", "content": f"Prior context summary:\n{summary.content}"},
             *to_keep,
@@ -361,18 +441,23 @@ class Agent(Generic[T]):  # noqa: UP046
         raise last_exc
 
     def _build_payload(self, params: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-        from .tools import tools_schema
+        defaults: dict[str, Any] = {}
+        if self.config.temperature is not None:
+            defaults["temperature"] = self.config.temperature
+        if self.config.max_tokens is not None:
+            defaults["max_tokens"] = self.config.max_tokens
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": self.system_prompt + self.messages,
+            **defaults,
             **(params or {}),
             **kwargs,
         }
         if self.use_tools:
-            tools = [
-                t for t in tools_schema()
-                if t["function"]["name"] not in self.disabled_tools
-            ]
+            raw_tools = self.toolset.schema() if self.toolset is not None else tools_schema()
+            tools = [t for t in raw_tools if t["function"]["name"] not in self.disabled_tools]
+            if self.tool_filter is not None:
+                tools = [t for t in tools if self.tool_filter(t, self)]
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
@@ -393,13 +478,14 @@ class Agent(Generic[T]):  # noqa: UP046
             return Reply(content=content)  # type: ignore[return-value]
         try:
             return TypeAdapter(self.response_model).validate_json(content)
-        except Exception:
-            logger.warning("failed to parse response as %s", self.response_model.__name__)
-            return None  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
+        except Exception as exc:
+            raise ModelRetry(f"Output failed validation as {self.response_model.__name__}: {exc}") from exc
 
     async def _dispatch_tool_calls(self, raw_calls: list[dict[str, Any]]) -> None:
-        # lazy import: tools.agent_tool imports agent, so top-level import would be circular
-        from .tools import dispatch_tool
+        async def _run(call: ToolCall) -> str:
+            if self.toolset is not None:
+                return await self.toolset.dispatch(call)
+            return await dispatch_tool(call, self._local_hooks or None)
 
         allow_calls: list[tuple[str, ToolCall]] = []
         confirm_calls: list[tuple[str, ToolCall]] = []
@@ -411,7 +497,7 @@ class Agent(Generic[T]):  # noqa: UP046
                 name=fn.get("name", ""),
                 args=json.loads(fn.get("arguments", "{}")),
             )
-            verdict = self.policy.gate(call.name)
+            verdict = self.policy.gate(call.name, call.args)
             if verdict == "deny":
                 self.messages.append({
                     "role": "tool",
@@ -424,26 +510,22 @@ class Agent(Generic[T]):  # noqa: UP046
             else:
                 allow_calls.append((raw["id"], call))
 
-        token = _agent_ctx.set(self)
-        try:
-            if allow_calls:
-                results = await asyncio.gather(*[dispatch_tool(c) for _, c in allow_calls])
-                for (tc_id, _), result in zip(allow_calls, results, strict=True):
-                    self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+        if allow_calls:
+            results = await asyncio.gather(*[_run(c) for _, c in allow_calls])
+            for (tc_id, _), result in zip(allow_calls, results, strict=True):
+                self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
 
-            for tc_id, call in confirm_calls:
-                approved = self.confirm_fn(call) if self.confirm_fn is not None else False
-                if not approved:
-                    self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": f"Tool {call.name!r} was denied by the user",
-                    })
-                else:
-                    result = await dispatch_tool(call)
-                    self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
-        finally:
-            _agent_ctx.reset(token)
+        for tc_id, call in confirm_calls:
+            approved = self.confirm_fn(call) if self.confirm_fn is not None else False
+            if not approved:
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": f"Tool {call.name!r} was denied by the user",
+                })
+            else:
+                result = await _run(call)
+                self.messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
 
     async def chat(
         self,
@@ -480,7 +562,37 @@ class Agent(Generic[T]):  # noqa: UP046
                 payload = self._build_payload(params, **kwargs)
                 continue
 
-            parsed = self._parse_response(message.get("content") or "")
+            parsed: T | None = None
+            for retry in range(self.config.max_output_retries + 1):
+                try:
+                    parsed = self._parse_response(message.get("content") or "")
+                    break
+                except ModelRetry as e:
+                    if retry >= self.config.max_output_retries:
+                        logger.warning("output validation failed after %d retries: %s", retry + 1, e)
+                        parsed = None
+                        break
+                    logger.info("output retry #%d: %s", retry + 1, e)
+                    self.messages.append({"role": "user", "content": f"Your output was invalid. Fix and try again.\n\nError: {e}"})
+                    payload = self._build_payload(params, **kwargs)
+                    start = time.perf_counter()
+                    response = await self._post_with_retry("/chat/completions", payload)
+                    elapsed = time.perf_counter() - start
+                    data = response.json()
+                    choices = data.get("choices", [])
+                    if not choices:
+                        break
+                    choice = choices[0]
+                    message = choice.get("message", {})
+                    finish_reason = choice.get("finish_reason")
+                    self.messages.append(message)
+                    if finish_reason == "tool_calls":
+                        # model called tools during retry -- dispatch and keep looping
+                        raw_calls = message.get("tool_calls") or []
+                        await self._dispatch_tool_calls(raw_calls)
+                        payload = self._build_payload(params, **kwargs)
+                        break
+
             return self._track(
                 ChatResponse(
                     message=message,
@@ -591,7 +703,18 @@ class Agent(Generic[T]):  # noqa: UP046
 
         message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
         self.messages.append(message)
-        parsed = self._parse_response(message.get("content") or "")
+        parsed: T | None = None
+        for retry in range(self.config.max_output_retries + 1):
+            try:
+                parsed = self._parse_response(message.get("content") or "")
+                break
+            except ModelRetry as e:
+                if retry >= self.config.max_output_retries:
+                    logger.warning("output validation failed after %d retries: %s", retry + 1, e)
+                    break
+                logger.info("output retry #%d: %s", retry + 1, e)
+                self.messages.append({"role": "user", "content": f"Your output was invalid. Fix and try again.\n\nError: {e}"})
+                return await self.chat("", params=params, **kwargs)
         return self._track(
             ChatResponse(
                 message=message,
@@ -612,3 +735,33 @@ class Agent(Generic[T]):  # noqa: UP046
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         await self.aclose()
+
+
+_MEMORY_PROMPT = (
+    "You are a memory curator. Given the conversation turn below, decide if anything "
+    "should be saved to memory.\n\n"
+    "- medium: facts, preferences, observations that may be useful across sessions\n"
+    "- long: stable definitions, rules, invariants worth preserving indefinitely\n\n"
+    "If nothing is worth saving, set save=false.\n\nConversation turn:\n{turn}"
+)
+
+
+async def run_memory_agent(turn_text: str, agent: Agent[Any]) -> None:
+    mem_cfg = agent.config_for_role("memory")
+    mem_agent: Agent[MemoryDecision] = Agent(
+        config=mem_cfg,
+        response_model=MemoryDecision,
+        use_tools=False,
+    )
+    mem_agent.runtime = agent.runtime
+    try:
+        decision = await mem_agent.chat(_MEMORY_PROMPT.format(turn=turn_text))
+        parsed = decision.parsed
+        if parsed is None or not parsed.save or not parsed.content:
+            return
+        remember_impl(parsed.content, parsed.tags, parsed.tier or "medium")
+        logger.debug("memory agent saved to %s: %s", parsed.tier, parsed.content[:60])
+    except Exception:
+        logger.debug("memory agent failed (non-fatal)", exc_info=True)
+    finally:
+        await mem_agent.aclose()

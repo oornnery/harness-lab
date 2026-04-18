@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import functools
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -17,8 +17,8 @@ class ToolCall(BaseModel):
     args: dict[str, Any]
 
 
-type PreHook = Callable[[ToolCall], None]
-type PostHook = Callable[[ToolCall, str], str | None]
+type PreHook = Callable[[ToolCall], Any]
+type PostHook = Callable[[ToolCall, str], Any]
 
 _PRE: list[tuple[PreHook, str | None]] = []
 _POST: list[tuple[PostHook, str | None]] = []
@@ -36,35 +36,41 @@ def hook(
     @hook("pre", tool="shell") -- scoped to a single tool
     """
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-        @functools.wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return fn(*args, **kwargs)
-
         if phase == "pre":
-            _PRE.append((wrapper, tool))  # type: ignore[arg-type]
+            _PRE.append((fn, tool))
         elif phase == "post":
-            _POST.append((wrapper, tool))  # type: ignore[arg-type]
+            _POST.append((fn, tool))
         else:
             raise ValueError(f"Unknown hook phase: {phase!r}. Use 'pre' or 'post'.")
-        return wrapper
+        return fn
 
     return deco
 
 
-def run_pre_hooks(call: ToolCall) -> None:
-    for fn, scope in _PRE:
+async def run_pre_hooks(call: ToolCall, local: list[tuple[str, Any, str | None]] | None = None) -> None:
+    hooks = [*_PRE]
+    if local:
+        hooks.extend((fn, scope) for phase, fn, scope in local if phase == "pre")
+    for fn, scope in hooks:
         if scope is not None and scope != call.name:
             continue
         logger.debug("pre-hook %s tool=%s", getattr(fn, "__name__", repr(fn)), call.name)
-        fn(call)
+        result = fn(call)
+        if inspect.iscoroutine(result):
+            await result
 
 
-def run_post_hooks(call: ToolCall, output: str) -> str:
-    for fn, scope in _POST:
+async def run_post_hooks(call: ToolCall, output: str, local: list[tuple[str, Any, str | None]] | None = None) -> str:
+    hooks = [*_POST]
+    if local:
+        hooks.extend((fn, scope) for phase, fn, scope in local if phase == "post")
+    for fn, scope in hooks:
         if scope is not None and scope != call.name:
             continue
         logger.debug("post-hook %s tool=%s", getattr(fn, "__name__", repr(fn)), call.name)
         result = fn(call, output)
+        if inspect.iscoroutine(result):
+            result = await result
         if result is not None:
             output = result
     return output

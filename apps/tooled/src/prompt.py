@@ -2,9 +2,10 @@ import readline
 from collections.abc import Callable
 from pathlib import Path
 
-from .agent import Agent, Thinking
 from .commands import PARAM_PARSERS, known_commands
-from .session import list_sessions
+from .core.agents import Agent, Thinking
+from .core.providers import list_providers
+from .core.session import list_sessions
 
 HISTORY_FILE = Path.cwd() / ".tooled" / "history"
 HEREDOC_TAG = "<<<"
@@ -17,12 +18,8 @@ def _ansi(text: str, code: str) -> str:
 PROMPT_YOU = _ansi("You:", "1;34") + " "
 PROMPT_CONT = _ansi("...", "2") + " "
 
-_agent_ref: Agent | None = None
-
 
 def init_readline(agent: Agent | None = None) -> None:
-    global _agent_ref
-    _agent_ref = agent
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     if HISTORY_FILE.exists():
         readline.read_history_file(HISTORY_FILE)
@@ -52,6 +49,8 @@ def _arg_candidates(cmd: str) -> list[str]:
         return ["list", "recall", "add", "clear", "forget"]
     if cmd == "/policy":
         return ["show", "allow", "confirm", "deny"]
+    if cmd == "/provider":
+        return list_providers()
     return []
 
 

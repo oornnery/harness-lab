@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 
@@ -13,12 +14,15 @@ from rich.prompt import Confirm
 from rich.text import Text
 from rich_argparse import RichHelpFormatter
 
-from .agent import Agent, AgentConfig, AgentError, ChatResponse
+from . import tools as _tools  # noqa: F401 -- side-effect: registers all tool implementations
 from .commands import KEEP_LAST_DEFAULT, build_help, dispatch, status_banner
-from .hooks import ToolCall
+from .core.agents import Agent, AgentConfig, AgentError, ChatResponse, run_memory_agent
+from .core.config import load_runtime_config
+from .core.hooks import ToolCall
+from .core.memory import load_medium_memory
+from .core.session import SessionState, autosave_session, ensure_session_id, latest_session_id, load_session, log_turn
+from .core.utils import console, thinking_progress
 from .prompt import cancel_turn, init_readline, read_input, save_history
-from .session import SessionState, autosave_session, ensure_session_id, latest_session_id, load_session, log_turn
-from .utils import console, thinking_progress
 
 
 def _parse_args() -> argparse.Namespace:
@@ -30,7 +34,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--session", help="Resume session by id")
     p.add_argument("-c", "--continue", dest="resume", action="store_true", help="Resume the most recent session")
     p.add_argument("--compact", action="store_true", help="Compact history after resume")
-    p.add_argument("--model", help="Override model for this run")
+    p.add_argument("--role", help="Override default role from config.toml")
+    p.add_argument("--model", help="Override model for this run (keeps provider)")
     p.add_argument("--instructions", help="Extra system instructions")
     p.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "WARNING"), help="Python logging level")
     p.add_argument("--no-stream", action="store_true", help="Disable streaming by default")
@@ -68,7 +73,6 @@ async def _run_stream_turn(
         nonlocal thinking_live
         if thinking_live is None:
             progress.stop()
-            console.print()
             console.print("[dim italic]Thinking:[/dim italic]")
             thinking_live = Live(Markdown("", style="dim"), console=console, refresh_per_second=15)
             thinking_live.start()
@@ -127,9 +131,6 @@ async def _async_main() -> None:
     load_dotenv(".env")
     logging.getLogger().setLevel(args.log_level.upper())
 
-    # import memory module so its @tool decorators register
-    from . import memory  # noqa: F401
-
     state = SessionState()
     if args.no_stream:
         state.stream_mode = False
@@ -140,13 +141,20 @@ async def _async_main() -> None:
     console.print(build_help())
     console.print()
 
-    config = AgentConfig()
+    runtime = load_runtime_config()
+    role_name = args.role or runtime.default_role
+    config = AgentConfig.from_role(runtime, role_name)
     if args.model:
         config.model = args.model
     if args.instructions:
         config.instructions = args.instructions.strip()
+    med_mem = load_medium_memory()
+    if med_mem:
+        mem_block = f"Memory (medium-term):\n{med_mem}"
+        config.instructions = f"{config.instructions}\n\n{mem_block}" if config.instructions else mem_block
 
     async with Agent(config=config) as agent:
+        agent.runtime = runtime
         def _confirm(call: ToolCall) -> bool:
             return Confirm.ask(
                 f"[yellow]Allow tool[/yellow] [cyan]{call.name}[/cyan] "
@@ -192,7 +200,7 @@ async def _async_main() -> None:
                     state.prefill = ""
                     try:
                         user_input = await asyncio.to_thread(read_input, prefill)
-                    except (KeyboardInterrupt, EOFError):
+                    except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
                         break
                 if not user_input:
                     continue
@@ -214,13 +222,13 @@ async def _async_main() -> None:
                         model=resp.model,
                         usage=resp.usage,
                         response_time=resp.response_time,
+                        agent_role=agent.config.provider.name,
                     )
                     console.print()
                     console.print(build_info(resp))
                     autosave_session(agent, state)
                     console.print(status_banner(state, agent))
                     # fire memory agent post-turn (non-blocking)
-                    from .memory import run_memory_agent
                     turn_text = f"User: {user_input}\nAssistant: {resp.content}"
                     _mem_task = asyncio.create_task(run_memory_agent(turn_text, agent))
                     del _mem_task  # fire-and-forget; stored to satisfy RUF006
@@ -243,7 +251,8 @@ async def _async_main() -> None:
 
 
 def main() -> None:
-    asyncio.run(_async_main())
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_async_main())
 
 
 if __name__ == "__main__":

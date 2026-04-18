@@ -13,3 +13,4 @@ build/
 .mcp.json
 .claude/
 .simple/
+.tooled/

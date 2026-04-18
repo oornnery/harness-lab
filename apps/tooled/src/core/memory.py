@@ -8,17 +8,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .tools import tool
-from .utils import logger
+from .tool import tool
 
 __all__ = [
     "MemoryDecision",
+    "MemoryEntry",
     "forget",
+    "load_medium_memory",
     "memory_clear",
     "memory_list",
     "recall",
     "remember",
-    "run_memory_agent",
+    "remember_impl",
 ]
 
 _HOME = Path.cwd() / ".tooled"
@@ -76,6 +77,13 @@ def _read_long_entries() -> list[MemoryEntry]:
     return entries
 
 
+def load_medium_memory() -> str:
+    """Return medium-term memory content, or empty string if none."""
+    if not _MED_FILE.exists():
+        return ""
+    return _MED_FILE.read_text(encoding="utf-8").strip()
+
+
 def _keyword_match(text: str, query: str) -> bool:
     tokens = query.lower().split()
     low = text.lower()
@@ -85,7 +93,7 @@ def _keyword_match(text: str, query: str) -> bool:
 # --- Tool implementations (registered below) ---
 
 
-def _remember_impl(text: str, tags: list[str], tier: str) -> str:
+def remember_impl(text: str, tags: list[str], tier: str) -> str:
     if tier == "long":
         entry = MemoryEntry(
             id=secrets.token_hex(8),
@@ -128,8 +136,8 @@ def _recall_impl(query: str, k: int, tier: str) -> str:
 
 
 @tool(name="remember", desc="Save a fact or observation to memory.")
-def remember(text: str, tags: list[str] = [], tier: str = "medium") -> str:  # noqa: B006
-    return _remember_impl(text, tags, tier)
+def remember(text: str, tags: list[str] | None = None, tier: str = "medium") -> str:
+    return remember_impl(text, tags or [], tier)
 
 
 @tool(name="recall", desc="Search memory for relevant facts matching a query.")
@@ -176,34 +184,3 @@ def memory_clear(tier: str = "all") -> int:
         _LONG_FILE.unlink()
         cleared += 1
     return cleared
-
-
-# --- Memory agent (post-turn promotion) ---
-
-_MEMORY_PROMPT = (
-    "You are a memory curator. Given the conversation turn below, decide if anything "
-    "should be saved to memory.\n\n"
-    "- medium: facts, preferences, observations that may be useful across sessions\n"
-    "- long: stable definitions, rules, invariants worth preserving indefinitely\n\n"
-    "If nothing is worth saving, set save=false.\n\nConversation turn:\n{turn}"
-)
-
-
-async def run_memory_agent(turn_text: str, agent: Agent) -> None:  # type: ignore[name-defined]  # noqa: F821  # ty: ignore[unresolved-reference]
-    """Run the memory agent post-turn. Fires-and-forgets -- errors are logged only."""
-    from .agent import Agent  # local import to avoid circular
-
-    try:
-        mem_agent: Agent[MemoryDecision] = Agent(
-            config=agent.config,
-            response_model=MemoryDecision,
-            use_tools=False,  # no tool dispatch in memory agent; avoid policy prompts
-        )
-        decision = await mem_agent.chat(_MEMORY_PROMPT.format(turn=turn_text))
-        parsed = decision.parsed
-        if parsed is None or not parsed.save or not parsed.content:
-            return
-        _remember_impl(parsed.content, parsed.tags, parsed.tier or "medium")
-        logger.debug("memory agent saved to %s: %s", parsed.tier, parsed.content[:60])
-    except Exception:
-        logger.debug("memory agent failed (non-fatal)", exc_info=True)

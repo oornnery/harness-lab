@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from . import tool
+from ..core.tool import tool
 
 _OUTPUT_LIMIT = 50 * 1024  # 50 KB
 

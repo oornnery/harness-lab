@@ -5,7 +5,7 @@ from urllib.parse import quote_plus, unquote
 
 import httpx
 
-from . import tool
+from ..core.tool import tool
 
 _BODY_LIMIT = 50 * 1024  # 50 KB
 
