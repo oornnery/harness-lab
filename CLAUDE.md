@@ -180,16 +180,71 @@ Read @RTK.md for conventions of the commands and tokens efficiently.
 
 ## Architecture
 
-<!-- Description of the overall architecture -->
+### Apps
+
+- **apps/simple/** -- Minimal REPL harness. No tools, no hooks, no policy. Single provider via env vars.
+- **apps/tooled/** -- Full tool-calling agent. Extends simple with `@tool` registry, hooks, policy, memory, multi-provider roles.
+
+### Tooled structure (`src/`)
+
+```
+core/          framework -- never imports from application layer
+  agent.py     Agent loop, AgentConfig, chat/chat_stream, ModelRetry
+  config.py    RuntimeConfig TOML loader, ProviderSpec, RoleSpec
+  hooks.py     @hook("pre"/"post"), async dispatch, ToolCall model
+  memory.py    3-tier store (session/medium .md/long .jsonl), remember/recall @tools
+  policy.py    Policy (allow/confirm/deny + conditions), gate(), persistence
+  providers.py Provider Protocol + OpenAICompatProvider + registry
+  session.py   autosave, transcript, export
+  tool.py      @tool decorator, ToolEntry, Toolset, _dispatch_impl
+  utils.py     console (stdout), _log_console (stderr), logger, thinking_progress
+  _context.py  RunContext[D] + _run_ctx ContextVar
+
+tools/         tool implementations
+  fs.py        read_file, write_file, list_dir, grep
+  shell.py     shell
+  web.py       fetch, web_search
+  agent.py     delegate (sub-agent)
+
+main.py        entry point, REPL loop
+commands.py    slash commands (/help, /config, /provider, /role, etc.)
+prompt.py      readline + tab completion
+diagram.py     architecture diagrams (netext)
+memory_agent.py  run_memory_agent (post-turn, fire-and-forget)
+```
+
+Dependency rule: `core/` imports only from `core/` and stdlib/3rd-party. Application imports from `core/`. Never the reverse.
+
+### Config (`.tooled/config.toml`)
+
+Multi-provider routing with per-role model selection. Env var convention: `{PREFIX}_API_KEY`, `{PREFIX}_BASE_URL`, `{PREFIX}_MODEL`. Auto-generated on first run from discovered env vars.
 
 ## Conventions
 
-<!-- Conventions for code style, testing, documentation, etc. -->
+- `@tool` decorator registers functions into global `_REGISTRY`. Side-effect imports in `tools/__init__.py` trigger registration.
+- `@hook("pre"/"post")` registers observability callbacks. Hooks can be async.
+- `Policy.gate(name, args)` returns "allow"/"confirm"/"deny". Unknown tools default to "confirm".
+- Memory tiers: session (in-agent messages), medium (`.tooled/memory.md`), long (`.tooled/memory_long.jsonl`).
+- Provider: `Provider` Protocol + `OpenAICompatProvider` dataclass. Registry via `register_provider()` / `get_provider()`.
+- Logging uses `RichHandler` on stderr (`_log_console`). REPL output uses `console` on stdout. This prevents log messages from corrupting readline prompts.
+- Python 3.13 (`.python-version`). Use modern syntax: `class X[T]:` not `class X(Generic[T]):`.
 
 ## Verification after changes
 
-<!-- Steps to verify correctness after making changes with format, linting and testing -->
+```bash
+cd apps/tooled
+uv run ruff check src      # lint
+uv run ty check src        # type check
+uv run python -c "from src.core import Agent; print('OK')"  # smoke test
+uv run python -c "import src.tools; from src.core.tool import registry_list; print(registry_list())"  # verify tools
+```
+
+No test suite yet. Manual smoke test: `uv run tooled` -- verify prompt renders, tools register, commands dispatch.
 
 ## Troubleshooting
 
-<!-- Common issues and how to resolve them -->
+- **Provider api_key empty**: Ollama and local providers don't need API keys. The warning is non-fatal. Set the env var to any placeholder if the provider requires auth.
+- **Config auto-generated**: On first run, `.tooled/config.toml` is created from discovered `{PREFIX}_API_KEY` env vars. Edit to customize roles and tool scoping.
+- **Policy confirm blocking tools**: Tools default to "confirm" policy. Use `/policy allow <tool>` to auto-approve, or edit `.tooled/policy.json`.
+- **Logging corrupts readline prompt**: Logs go to stderr, REPL prompt goes to stdout. If still corrupted, check terminal multiplexer settings.
+- **429 rate limit**: The agent retries up to 3 times with exponential backoff on 429/5xx errors. Adjust `MAX_ATTEMPTS` in `core/agent.py` if needed.

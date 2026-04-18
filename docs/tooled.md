@@ -24,14 +24,14 @@ messages and re-invokes the model. Stack is fully async
 
 ## 3. Requirements
 
-| Item                | Value                                                                         |
-| ------------------- | ----------------------------------------------------------------------------- |
-| Runtime             | Python 3.12+                                                                  |
-| Package manager     | `uv`                                                                          |
-| Provider            | Must support tool calling (OpenAI, Mistral, compatibles, tool-capable Ollama) |
-| Env vars (required) | Same as `simple`                                                              |
-| Deps runtime        | `httpx`, `rich>=15`, `python-dotenv`, `pydantic>=2`                           |
-| Deps stdlib         | Same as `simple`                                                              |
+| Item            | Value                                                                                |
+| --------------- | ------------------------------------------------------------------------------------ |
+| Runtime         | Python 3.12+                                                                         |
+| Package manager | `uv`                                                                                 |
+| Provider        | Must support tool calling (OpenAI, Mistral, compatibles, tool-capable Ollama)        |
+| Config          | `.tooled/config.toml` (multi-provider + per-role) OR legacy `.env` (single provider) |
+| Deps runtime    | `httpx`, `rich>=15`, `python-dotenv`, `pydantic>=2`                                  |
+| Deps stdlib     | `tomllib` (Python 3.11+), `asyncio`, `contextvars`                                   |
 
 ## 4. Architecture
 
@@ -40,18 +40,20 @@ Same shape as `simple`; new modules in bold.
 ```mermaid
 flowchart LR
     U([User]) --> MAIN[main.py]
+    MAIN --> CFG[config.py<br/>RuntimeConfig TOML]
+    CFG --> PROV[providers.py<br/>registry]
     MAIN --> AGENT[agent.py<br/>tool loop]
-    AGENT -->|tools=schema| API[(Provider)]
+    AGENT -->|tools=schema| API[(Provider<br/>OpenAI-compatible)]
     API -->|tool_calls| AGENT
     AGENT --> POL[policy.py]
     POL -->|allow| HOOKPRE[hooks.py pre]
-    HOOKPRE --> TOOLS[tools.py registry]
+    HOOKPRE --> TOOLS[tools/ registry]
     TOOLS --> MEM[memory.py<br/>remember/recall]
-    TOOLS --> FS[fs / shell / fetch / web_search]
+    TOOLS --> FS[fs / shell / fetch / web_search / delegate]
     TOOLS --> HOOKPOST[hooks.py post]
     HOOKPOST --> AGENT
     AGENT --> HIST[(messages + tool results)]
-    AGENT -.->|async post-turn| MEMAGT[memory_agent]
+    AGENT -.->|async post-turn| MEMAGT[memory_agent<br/>role=memory]
     MEMAGT --> MEM
     MAIN --> SESS[session.py]
     SESS --> DISK[(./.tooled/)]
@@ -62,18 +64,20 @@ flowchart LR
 
 ## 5. Components
 
-| Module        | Responsibility                                                         |
-| ------------- | ---------------------------------------------------------------------- |
-| `agent.py`    | Async tool loop, `async chat`/`chat_stream`, required `response_model` |
-| `tools/`      | `@tool` registry, schema gen, dispatch + catalog (fs/shell/fetch/web)  |
-| `hooks.py`    | `@hook("pre"/"post")` decorator registry, `ToolCall` Pydantic model    |
-| `policy.py`   | `Policy` Pydantic model, `gate()`, `ToolDenied`, persistence           |
-| `memory.py`   | 3-tier memory (session/md/jsonl), memory agent, `remember`/`recall`    |
-| `session.py`  | Autosave, transcript, export (mirrors `simple`)                        |
-| `commands.py` | Slash registry; adds `/tools`, `/memory`, `/policy`, `/hooks`          |
-| `prompt.py`   | Same readline + ANSI prompts + Tab completion as `simple`              |
-| `main.py`     | Argparse, REPL, streaming render                                       |
-| `utils.py`    | `console`, `logger`, `thinking_progress` (reused from `simple`)        |
+| Module          | Responsibility                                                         |
+| --------------- | ---------------------------------------------------------------------- |
+| `agent.py`      | Async tool loop, `async chat`/`chat_stream`, required `response_model` |
+| `providers.py`  | `Provider` Protocol + `OpenAICompatProvider` + registry                |
+| `config.py`     | `RuntimeConfig` -- TOML loader, role -> provider+model resolution      |
+| `tools/`        | `@tool` registry, schema gen, dispatch + catalog (fs/shell/web/agent)  |
+| `hooks.py`      | `@hook("pre"/"post")` decorator registry, `ToolCall` Pydantic model    |
+| `policy.py`     | `Policy` Pydantic model, `gate()`, `ToolDenied`, persistence           |
+| `memory.py`     | 3-tier memory (session/md/jsonl), memory agent, `remember`/`recall`    |
+| `session.py`    | Autosave, transcript, export (mirrors `simple`)                        |
+| `commands.py`   | Slash registry; adds `/tools`, `/memory`, `/policy`, `/hooks`          |
+| `prompt.py`     | Same readline + ANSI prompts + Tab completion as `simple`              |
+| `main.py`       | Argparse (adds `--role`), REPL, streaming render, confirm_fn wiring    |
+| `utils.py`      | `console`, `logger`, `thinking_progress` (reused from `simple`)        |
 
 ## 6. Features
 
@@ -91,6 +95,14 @@ def read_file(path: str) -> str: ...
 - `tools_schema()` builds the request payload
 - `dispatch_tool(name, args_json)` validates args via `TypeAdapter`,
   then runs the tool and returns a string
+- `@tool(..., returns=MyModel)` validates output via `TypeAdapter`
+  before returning to the model
+- Tools may declare `ctx: RunContext[T]` as first param -- injected at
+  dispatch, excluded from JSON schema
+- Google-style docstring `Args:` section parsed into
+  `parameters.properties[*].description` in schema
+- `Toolset` dataclass wraps an isolated tool registry per agent;
+  `Agent(toolset=...)` overrides global registry
 
 **Catalog** (all in `tools/` subpackage, registered on import):
 
@@ -137,6 +149,9 @@ def confirm_shell(call: ToolCall) -> None:
 - `@hook("pre")` -- runs before dispatch; may raise `ToolDenied` to abort
 - `@hook("post")` -- runs after dispatch; may return modified output string
 - optional `tool=` narrows scope to a single tool name
+- Hooks may be `async def` -- automatically awaited
+- Per-agent hooks via `agent.add_hook("pre", fn, tool="shell")`;
+  run alongside global hooks
 - registry is a list per phase; hooks run in definition order
 - `hooks_list()` returns registered hooks for `/hooks` command
 
@@ -154,17 +169,21 @@ Pydantic model -- schema validated, serializes directly to/from
 
 ```python
 class Policy(BaseModel):
-    allow:   set[str] = Field(default_factory=set)
-    confirm: set[str] = Field(default_factory=set)
-    deny:    set[str] = Field(default_factory=set)
+    allow:      set[str] = Field(default_factory=set)
+    confirm:    set[str] = Field(default_factory=set)
+    deny:       set[str] = Field(default_factory=set)
+    conditions: dict[str, list[str]] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
 
-    def gate(self, name: str) -> Literal["allow", "confirm", "deny"]:
+    def gate(self, name: str, args: dict | None = None) -> Literal["allow", "confirm", "deny"]:
         if name in self.deny:    return "deny"
         if name in self.confirm: return "confirm"
-        if name in self.allow:   return "allow"
-        return "confirm"  # unknown tools require confirmation by default
+        if name in self.allow:
+            if self._condition_triggers(name, args):
+                return "confirm"
+            return "allow"
+        return "confirm"
 ```
 
 Gate enforced before every dispatch -- tool is blocked until verdict
@@ -187,6 +206,10 @@ async def dispatch_with_policy(call: ToolCall, policy: Policy) -> str:
 - Unknown tool names default to `confirm` (safe default)
 - Editable at runtime via `/policy allow|confirm|deny <tool>`; persisted
   to `./.tooled/policy.json` via `model.model_dump_json()`
+- **Conditional approval**: `conditions` maps tool name to substring
+  patterns. When an allowed tool's args JSON contains any pattern, the
+  gate returns `"confirm"` instead of `"allow"`. Set via
+  `/policy condition shell "rm "`. Substring match on `json.dumps(args)`.
 
 ### 6.4 Memory
 
@@ -304,29 +327,178 @@ First-class `@tool` helper that spawns a sub-agent with its own history:
 ```python
 @tool(name="delegate", desc="Run a sub-task with a fresh agent")
 async def delegate(instructions: str) -> str:
-    sub = Agent(config)
+    parent = _agent_ctx.get()
+    sub = Agent(config=parent.config)
+    sub.confirm_fn = parent.confirm_fn
     resp = await sub.chat(instructions)
     return resp.content
 ```
 
-- Sub-agent shares `AgentConfig` (model, provider) but isolated history
+- Sub-agent reuses parent `AgentConfig` today (planned: `role="delegate"`
+  via runtime config -- see 6.10)
 - Returns string result to parent; parent appends as `role=tool` message
 - No automatic state sharing -- parent must pass context in `instructions`
 - `/tools` command shows `delegate` like any other tool
 
+### 6.10 Multi-provider + role routing (TOML)
+
+Provider identity is decoupled from `AgentConfig` so different sub-agents
+can run on different models/providers.
+
+**Split**: `agent.py` holds the loop only; HTTP client + auth lives in
+`providers.py`; role -> provider+model resolution lives in `config.py`.
+
+```python
+class Provider(Protocol):
+    name: str
+    base_url: str
+    api_key: str
+    def build_client(self, connect: float, read: float) -> httpx.AsyncClient: ...
+
+@dataclass
+class AgentConfig:
+    provider: Provider
+    model: str
+    system_prompt: str = SYSTEM_PROMPT
+    instructions: str = ""
+    temperature: float | None = None
+    max_tokens: int | None = None
+    ...
+
+    @classmethod
+    def from_role(cls, runtime: RuntimeConfig, role: str) -> AgentConfig: ...
+```
+
+`.tooled/config.toml` drives routing:
+
+```toml
+default_role = "main"
+
+[providers.mistral]
+base_url = "https://api.mistral.ai/v1"
+api_key_env = "MISTRAL_API_KEY"
+
+[providers.glm]
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "GLM_API_KEY"
+
+[roles.main]
+provider = "mistral"
+model = "mistral-large-latest"
+
+[roles.compact]
+provider = "mistral"
+model = "mistral-small-latest"
+temperature = 0.3
+
+[roles.memory]
+provider = "glm"
+model = "glm-4.6"
+
+[roles.delegate]
+provider = "glm"
+model = "glm-4.6"
+
+[tools.memory]
+allow = []            # memory agent does not call tools
+
+[tools.delegate]
+deny = ["delegate"]   # prevent recursion
+```
+
+- Single `RuntimeConfig` loaded at boot; stored on `agent.runtime`.
+- Every sub-agent callsite resolves its role:
+  - `compact()` -> `from_role(runtime, "compact")` (small cheap model)
+  - `run_memory_agent` -> `from_role(runtime, "memory")`
+  - `delegate` tool -> `from_role(runtime, "delegate")`
+- **Auto-gen**: when `.tooled/config.toml` is absent, `load_runtime_config()`
+  writes one to disk built from any `{PREFIX}_API_KEY` env vars it finds
+  (e.g. `MISTRAL_API_KEY`, `GLM_API_KEY`); `base_url` and `model` are
+  referenced via `base_url_env`/`model_env` so `.env` stays the source of
+  truth. Falls back to legacy `API_KEY` / `BASE_URL` / `MODEL` when no
+  prefixed vars exist. Zero breaking change.
+- **Env-var convention**: `ProviderSpec` accepts `base_url` (literal) or
+  `base_url_env` (env var name); `RoleSpec` accepts `model` or `model_env`.
+  Resolved lazily at load time.
+- CLI: `tooled --role <name>` overrides `default_role`; `--model <id>`
+  overrides only the model name (keeps provider).
+- Per-role tool scoping (`[tools.<role>]`): `deny` prevents exposure,
+  `allow = []` disables all. Sub-agents inherit scoping from runtime.
+
+### 6.11 ModelRetry (output validation retry)
+
+When `response_model` is set and the model returns invalid JSON,
+`_parse_response` raises `ModelRetry`. The agent re-prompts the model
+with the validation error up to `max_output_retries` times (default 2).
+
+```python
+class ModelRetry(Exception): ...
+```
+
+- `AgentConfig.max_output_retries: int = 2`
+- Retry message: "Your output was invalid. Fix and try again. Error: ..."
+- If all retries fail, `parsed` is `None` and the raw content is still
+  available via `ChatResponse.content`
+
+### 6.12 RunContext[T]
+
+Typed context available inside tool dispatch. Replaces the untyped
+`_agent_ctx: ContextVar[Any]`.
+
+```python
+class RunContext[D]:
+    agent: Agent
+    deps: D
+    tool_call: ToolCall
+    turn: int
+```
+
+- Tools declare `ctx: RunContext[MyDeps]` as first param -- detected
+  via `get_type_hints()`, stripped from JSON schema, injected at dispatch
+- `Agent.deps: Any` set by caller; available via `ctx.deps`
+- Set/reset per-tool-call in `dispatch_tool`
+
+### 6.13 Dynamic tool lists (Toolset + tool_filter)
+
+`Toolset` wraps an isolated tool registry for per-agent customization:
+
+```python
+@dataclass
+class Toolset:
+    tools: dict[str, ToolEntry]
+    def schema(self, disabled: set[str] | None = None) -> list[dict]: ...
+    async def dispatch(self, call: ToolCall) -> str: ...
+```
+
+- `Agent(toolset=my_toolset)` overrides the global `_REGISTRY`
+- `Agent(tool_filter=my_filter)` accepts `(schema_entry, agent) -> bool`;
+  filters tools before adding to payload
+- Falls back to global registry for missing names
+
+### 6.14 Slash commands (Onda 4 additions)
+
+- `/config` -- show active TOML config: providers (no key leaks), roles,
+  tool scoping
+- `/role <name>` -- hot-swap the agent to a different role/model at
+  runtime (closes old client, builds new one)
+- Transcript entries now include `agent_role` field identifying the
+  provider that handled the turn
+
 ## 7. Storage
 
-| Path                           | Purpose                              |
-| ------------------------------ | ------------------------------------ |
-| `./.tooled/sessions/<id>.json` | session (same shape as simple)       |
-| `./.tooled/memory.md`          | medium-term memory (facts/obs)       |
-| `./.tooled/memory_long.jsonl`  | long-term memory (rules/definitions) |
-| `./.tooled/policy.json`        | persisted policy                     |
-| `./.tooled/transcript.jsonl`   | turn log incl. tool calls            |
-| `./.tooled/exports/<id>.md`    | markdown export                      |
-| `./.tooled/history`            | readline prompt history              |
+| Path                             | Purpose                              |
+| -------------------------------- | ------------------------------------ |
+| `./.tooled/config.toml`          | providers + roles (multi-provider)   |
+| `./.tooled/config.toml.example`  | template committable to the repo     |
+| `./.tooled/sessions/<id>.json`   | session (same shape as simple)       |
+| `./.tooled/memory.md`            | medium-term memory (facts/obs)       |
+| `./.tooled/memory_long.jsonl`    | long-term memory (rules/definitions) |
+| `./.tooled/policy.json`          | persisted policy                     |
+| `./.tooled/transcript.jsonl`     | turn log incl. tool calls            |
+| `./.tooled/exports/<id>.md`      | markdown export                      |
+| `./.tooled/history`              | readline prompt history              |
 
-Add `.tooled/` to `.gitignore`.
+Add `.tooled/` to `.gitignore` (keep `config.toml.example`).
 
 ## 8. When to use
 

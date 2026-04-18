@@ -45,11 +45,13 @@ flowchart LR
 
 ## Apps
 
-| App                          | Focus                                              |
-| ---------------------------- | -------------------------------------------------- |
-| [apps/simple/](apps/simple/) | Tiny harness, REPL + slash commands, no framework  |
+| App                          | Focus                                                        |
+| ---------------------------- | ------------------------------------------------------------ |
+| [apps/simple/](apps/simple/) | Tiny harness, REPL + slash commands, no framework            |
+| [apps/tooled/](apps/tooled/) | Tool calls + hooks + policy + memory + multi-provider roles  |
 
-See [apps/simple/README.md](apps/simple/README.md) for details.
+See [apps/simple/README.md](apps/simple/README.md) and
+[apps/tooled/README.md](apps/tooled/README.md) for details.
 
 ## Stack
 
@@ -62,7 +64,8 @@ See [apps/simple/README.md](apps/simple/README.md) for details.
 
 ```bash
 uv sync
-uv run simple           # current app
+uv run simple           # small REPL, no tools
+uv run tooled           # tool-calling loop
 ```
 
 ## References
